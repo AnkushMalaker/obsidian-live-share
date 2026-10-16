@@ -150,7 +150,10 @@ try {
   await stop();
   if (testService) {
     const service = (action) => {
-      const result = spawnSync(cli, [action, "--directory", directory], { encoding: "utf8", timeout: 20_000 });
+      const result = spawnSync(cli, [action, "--directory", directory], {
+        encoding: "utf8",
+        timeout: 20_000,
+      });
       assert.equal(result.status, 0, result.stderr || result.stdout);
       return result.stdout;
     };
@@ -166,14 +169,17 @@ try {
     assert.match(service("status"), /Service: not loaded/);
     assert.equal(await readFile(envPath, "utf8"), original);
     assert.equal((await stat(join(directory, "data"))).isDirectory(), true);
-    console.log("PASS native macOS service: install, startup, status, repeated install, room persistence and removal retaining data.");
+    console.log(
+      "PASS native macOS service: install, startup, status, repeated install, room persistence and removal retaining data.",
+    );
   }
   passed = true;
   console.log(
     "PASS packed global CLI: help, port validation, authenticated startup, graceful shutdown, restart, configuration and room persistence.",
   );
 } finally {
-  if (installedService) spawnSync(cli, ["uninstall-service", "--directory", directory], { encoding: "utf8" });
+  if (installedService)
+    spawnSync(cli, ["uninstall-service", "--directory", directory], { encoding: "utf8" });
   if (child && child.exitCode === null && child.signalCode === null) {
     child.kill("SIGKILL");
     await new Promise((resolve) => child.once("exit", resolve));

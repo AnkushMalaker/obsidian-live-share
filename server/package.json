@@ -7,12 +7,7 @@
   "bin": {
     "obsidian-live-share-relay": "bin/relay.mjs"
   },
-  "files": [
-    "dist",
-    "bin",
-    ".env.example",
-    "README.md"
-  ],
+  "files": ["dist", "bin", ".env.example", "README.md"],
   "engines": {
     "node": ">=20.19"
   },
