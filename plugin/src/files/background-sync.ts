@@ -8,12 +8,14 @@ import {
   applyMinimalYTextUpdate,
   ensureFolder,
   getFileByPath,
+  isCanvasFile,
   isTextFile,
   normalizeLineEndings,
   normalizePath,
   toCanonicalPath,
   toLocalPath,
 } from "../utils";
+import type { CanvasSync } from "./canvas-sync";
 import type { FileOpsManager } from "./file-ops";
 import type { ManifestManager } from "./manifest";
 
@@ -37,7 +39,12 @@ export class BackgroundSync {
     private syncManager: SyncManager,
     private manifestManager: ManifestManager,
     private fileOpsManager: FileOpsManager,
+    private canvasSync: CanvasSync | null = null,
   ) {}
+
+  setCanvasSync(canvasSync: CanvasSync): void {
+    this.canvasSync = canvasSync;
+  }
 
   isRunning(): boolean {
     return this.running;
@@ -48,7 +55,7 @@ export class BackgroundSync {
     this.role = role;
     const entries = this.manifestManager.getEntries();
     for (const [path, entry] of entries) {
-      if (!isTextFile(path) || entry.binary) continue;
+      if (!isTextFile(path) || entry.binary || entry.directory) continue;
       try {
         await this.subscribe(path);
       } catch {
@@ -66,6 +73,10 @@ export class BackgroundSync {
 
   async subscribe(rawPath: string): Promise<void> {
     const path = toCanonicalPath(normalizePath(rawPath));
+    if (isCanvasFile(path)) {
+      await this.canvasSync?.subscribe(path, this.role === "host" ? "host" : "guest");
+      return;
+    }
     if (this.observers.has(path) || this.subscribing.has(path)) return;
     this.cancelledSubscribes.delete(path);
     this.subscribing.add(path);
@@ -135,6 +146,10 @@ export class BackgroundSync {
 
   unsubscribe(rawPath: string): void {
     const path = toCanonicalPath(normalizePath(rawPath));
+    if (isCanvasFile(path)) {
+      this.canvasSync?.unsubscribe(path);
+      return;
+    }
     this.flushWrite(path);
     const unobserve = this.observers.get(path);
     if (unobserve) {
@@ -144,7 +159,7 @@ export class BackgroundSync {
   }
 
   setActiveFile(rawPath: string | null): void {
-    const path = rawPath ? toCanonicalPath(normalizePath(rawPath)) : null;
+    const path = rawPath && !isCanvasFile(rawPath) ? toCanonicalPath(normalizePath(rawPath)) : null;
     const oldActive = this.activeFile;
     this.activeFile = path;
 
@@ -171,8 +186,21 @@ export class BackgroundSync {
     await this.subscribe(path);
   }
 
+  async onLocalFileAdded(rawPath: string): Promise<void> {
+    if (isCanvasFile(rawPath)) {
+      // The creator seeds a new board, including when the creator is a guest.
+      await this.canvasSync?.subscribe(rawPath, "host");
+      return;
+    }
+    await this.onFileAdded(rawPath);
+  }
+
   onFileRemoved(rawPath: string): void {
     const path = toCanonicalPath(normalizePath(rawPath));
+    if (isCanvasFile(path)) {
+      this.canvasSync?.unsubscribe(path);
+      return;
+    }
     const timer = this.writeTimers.get(path);
     if (timer) {
       clearTimeout(timer);
@@ -189,6 +217,11 @@ export class BackgroundSync {
   async onFileRenamed(oldPath: string, newPath: string): Promise<void> {
     const normOld = toCanonicalPath(normalizePath(oldPath));
     const normNew = toCanonicalPath(normalizePath(newPath));
+    if (isCanvasFile(normOld) || isCanvasFile(normNew)) {
+      this.onFileRemoved(normOld);
+      if (isTextFile(normNew)) await this.subscribe(normNew);
+      return;
+    }
 
     const timer = this.writeTimers.get(normOld);
     if (timer) {
@@ -249,6 +282,15 @@ export class BackgroundSync {
 
   async handleLocalTextModify(rawPath: string): Promise<void> {
     const path = toCanonicalPath(normalizePath(rawPath));
+    if (isCanvasFile(path)) {
+      await this.subscribe(path);
+      await this.canvasSync?.handleLocalModify(path);
+      if (this.role === "host") {
+        const file = getFileByPath(this.vault, toLocalPath(path));
+        if (file) await this.manifestManager.updateFile(file, await this.vault.read(file));
+      }
+      return;
+    }
     if (this.recentDiskWrites.has(path)) return;
     if (path === this.collabBoundFile) return;
 
@@ -274,6 +316,7 @@ export class BackgroundSync {
 
   destroy(): void {
     this.running = false;
+    this.canvasSync = null;
     // Flush all pending debounced writes before clearing
     for (const path of [...this.writeTimers.keys()]) {
       this.flushWrite(path);

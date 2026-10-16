@@ -1,7 +1,7 @@
 import { MarkdownView, Notice, type TAbstractFile, TFile } from "obsidian";
 
 import type LiveSharePlugin from "../main";
-import { isTextFile } from "../utils";
+import { isCanvasFile, isTextFile } from "../utils";
 
 export function registerVaultEvents(plugin: LiveSharePlugin): void {
   let pendingRename: Promise<void> | null = null;
@@ -27,7 +27,16 @@ export function registerVaultEvents(plugin: LiveSharePlugin): void {
       if (!plugin.manifestManager.isSharedPath(originalPath)) return;
       if (plugin.fileOpsManager.isPathMuted(originalPath)) return;
       if (renamedPaths.has(originalPath)) return;
-      void plugin.fileOpsManager.onFileCreate(file);
+      if (file instanceof TFile && isCanvasFile(originalPath)) {
+        void plugin.backgroundSync
+          .onLocalFileAdded(originalPath)
+          .then(() => {
+            if (!renamedPaths.has(originalPath)) return plugin.fileOpsManager.onFileCreate(file);
+          })
+          .catch((err) => plugin.logger.error("canvas", "failed to sync new canvas", err));
+      } else {
+        void plugin.fileOpsManager.onFileCreate(file);
+      }
       if (plugin.settings.role === "host") {
         if (file instanceof TFile) {
           void (async () => {
@@ -111,17 +120,16 @@ export function registerVaultEvents(plugin: LiveSharePlugin): void {
   plugin.registerEvent(
     plugin.app.vault.on("modify", (file: TAbstractFile) => {
       if (!(file instanceof TFile) || !plugin.manifestManager.isSharedPath(file.path)) return;
+      if (isCanvasFile(file.path)) {
+        // CanvasSync compares snapshots to distinguish its writes from user edits.
+        // A timed mute would also drop genuine edits made just after a remote save.
+        void plugin.backgroundSync.handleLocalTextModify(file.path);
+        return;
+      }
       if (plugin.fileOpsManager.isPathMuted(file.path)) return;
 
       if (isTextFile(file.path)) {
         if (plugin.backgroundSync.isRecentDiskWrite(file.path)) return;
-        if (
-          file.path.endsWith(".canvas") &&
-          plugin.canvasSync?.isSubscribed(file.path) &&
-          !plugin.canvasSync.isRecentDiskWrite(file.path)
-        ) {
-          void plugin.canvasSync.handleLocalModify(file.path);
-        }
         void plugin.backgroundSync.handleLocalTextModify(file.path);
         return;
       }

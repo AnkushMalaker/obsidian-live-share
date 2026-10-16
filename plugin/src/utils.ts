@@ -166,6 +166,10 @@ const TEXT_EXTENSIONS = new Set([
   "svelte",
 ]);
 
+export function isCanvasFile(path: string): boolean {
+  return path.toLowerCase().endsWith(".canvas");
+}
+
 export function isTextFile(path: string): boolean {
   const dot = path.lastIndexOf(".");
   if (dot < 0) return false;

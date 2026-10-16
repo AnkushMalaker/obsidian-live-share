@@ -18,180 +18,232 @@ const DEBOUNCE_MS = 1000;
 interface CanvasData {
   nodes: Record<string, Record<string, unknown>>;
   edges: Record<string, Record<string, unknown>>;
+  properties: Record<string, unknown>;
+  nodeOrder: string[];
+  edgeOrder: string[];
 }
 
-function parseCanvas(content: string): CanvasData {
+function emptyCanvas(): CanvasData {
+  return { nodes: {}, edges: {}, properties: {}, nodeOrder: [], edgeOrder: [] };
+}
+
+function parseCanvas(content: string): CanvasData | null {
   try {
     const parsed = JSON.parse(content);
-    const nodes: Record<string, Record<string, unknown>> = {};
-    const edges: Record<string, Record<string, unknown>> = {};
-    if (Array.isArray(parsed.nodes)) {
-      for (const node of parsed.nodes) {
-        if (node.id) nodes[node.id] = node;
-      }
+    if (!parsed || !Array.isArray(parsed.nodes) || !Array.isArray(parsed.edges)) return null;
+    const { nodes, edges, ...properties } = parsed;
+    const data: CanvasData = { ...emptyCanvas(), properties };
+    for (const node of nodes) {
+      if (!node || typeof node.id !== "string") return null;
+      data.nodes[node.id] = node;
+      data.nodeOrder.push(node.id);
     }
-    if (Array.isArray(parsed.edges)) {
-      for (const edge of parsed.edges) {
-        if (edge.id) edges[edge.id] = edge;
-      }
+    for (const edge of edges) {
+      if (!edge || typeof edge.id !== "string") return null;
+      data.edges[edge.id] = edge;
+      data.edgeOrder.push(edge.id);
     }
-    return { nodes, edges };
+    return data;
   } catch {
-    return { nodes: {}, edges: {} };
+    // Partial/invalid saves must not become a request to delete every card.
+    return null;
   }
 }
 
-function serializeCanvas(nodesMap: Y.Map<Y.Map<unknown>>, edgesMap: Y.Map<Y.Map<unknown>>): string {
-  const nodes: Record<string, unknown>[] = [];
-  const edges: Record<string, unknown>[] = [];
-
-  for (const [, nodeYMap] of nodesMap) {
-    const obj: Record<string, unknown> = {};
-    for (const [key, value] of nodeYMap) {
-      obj[key] = value;
-    }
-    nodes.push(obj);
-  }
-
-  for (const [, edgeYMap] of edgesMap) {
-    const obj: Record<string, unknown> = {};
-    for (const [key, value] of edgeYMap) {
-      obj[key] = value;
-    }
-    edges.push(obj);
-  }
-
-  return JSON.stringify({ nodes, edges }, null, "\t");
+function equal(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
 }
 
-function applyToYMap(ymap: Y.Map<unknown>, obj: Record<string, unknown>): void {
-  const existingKeys = new Set<string>();
-  for (const key of ymap.keys()) {
-    existingKeys.add(key);
+function applyProperties(
+  map: Y.Map<unknown>,
+  next: Record<string, unknown>,
+  previous: Record<string, unknown>,
+): void {
+  for (const [key, value] of Object.entries(next)) {
+    if (!equal(value, previous[key]) && !equal(value, map.get(key))) map.set(key, value);
   }
-  for (const [key, value] of Object.entries(obj)) {
-    const existing = ymap.get(key);
-    if (existing !== value) {
-      ymap.set(key, value);
+  for (const key of Object.keys(previous)) {
+    if (!(key in next)) map.delete(key);
+  }
+}
+
+function applyItems(
+  map: Y.Map<Y.Map<unknown>>,
+  next: Record<string, Record<string, unknown>>,
+  previous: Record<string, Record<string, unknown>>,
+): void {
+  for (const [id, item] of Object.entries(next)) {
+    if (equal(item, previous[id])) continue;
+    let shared = map.get(id);
+    if (!shared) {
+      // A remote deletion wins over a stale edit of an existing card.
+      if (previous[id]) continue;
+      shared = new Y.Map<unknown>();
+      map.set(id, shared);
     }
-    existingKeys.delete(key);
+    applyProperties(shared, item, previous[id] ?? {});
   }
-  for (const key of existingKeys) {
-    ymap.delete(key);
+  for (const id of Object.keys(previous)) {
+    if (!(id in next)) map.delete(id);
   }
+}
+
+function applyOrder(order: Y.Map<number>, next: string[], previous: string[]): void {
+  const oldPositions = new Map(previous.map((id, index) => [id, index]));
+  const nextIds = new Set(next);
+  for (const [index, id] of next.entries()) {
+    if (oldPositions.get(id) !== index) order.set(id, index);
+  }
+  for (const id of previous) {
+    if (!nextIds.has(id)) order.delete(id);
+  }
+}
+
+function orderedItems(items: Y.Map<Y.Map<unknown>>, order: Y.Map<number>): unknown[] {
+  return [...items.entries()]
+    .sort(
+      ([a], [b]) =>
+        (order.get(a) ?? Number.POSITIVE_INFINITY) - (order.get(b) ?? Number.POSITIVE_INFINITY) ||
+        a.localeCompare(b),
+    )
+    .map(([, item]) => item.toJSON());
 }
 
 export class CanvasSync {
-  private vault: Vault;
-  private syncManager: SyncManager;
-  private fileOpsManager: FileOpsManager;
   private subscribedPaths = new Set<string>();
+  private subscriptions = new Map<string, object>();
+  private roles = new Map<string, "host" | "guest">();
+  private subscribing = new Map<string, Promise<void>>();
   private observers = new Map<string, () => void>();
   private writeTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private writeQueues = new Map<string, Promise<void>>();
   private recentDiskWrites = new Set<string>();
-  private recentLocalEdits = new Set<string>();
-  private lastWrittenContent = new Map<string, string>();
+  private lastLocalData = new Map<string, CanvasData>();
 
-  constructor(vault: Vault, syncManager: SyncManager, fileOpsManager: FileOpsManager) {
-    this.vault = vault;
-    this.syncManager = syncManager;
-    this.fileOpsManager = fileOpsManager;
-  }
+  constructor(
+    private vault: Vault,
+    private syncManager: SyncManager,
+    private fileOpsManager: FileOpsManager,
+  ) {}
 
   async subscribe(rawPath: string, role: "host" | "guest"): Promise<void> {
     const path = toCanonicalPath(normalizePath(rawPath));
-    if (this.subscribedPaths.has(path)) return;
+    const pending = this.subscribing.get(path);
+    if (pending) return pending;
+    if (this.observers.has(path)) return;
+    const subscription = {};
+    this.subscriptions.set(path, subscription);
+    this.roles.set(path, role);
     this.subscribedPaths.add(path);
+    const task = this.subscribePath(path, role, subscription);
+    this.subscribing.set(path, task);
+    try {
+      await task;
+    } finally {
+      if (this.subscribing.get(path) === task) this.subscribing.delete(path);
+    }
+  }
 
+  private async subscribePath(path: string, role: "host" | "guest", subscription: object) {
     const docId = `${CANVAS_DOC_PREFIX}${path}`;
-    const docHandle = this.syncManager.getDoc(docId);
-    if (!docHandle) {
+    const handle = this.syncManager.getDoc(docId);
+    if (!handle) {
       this.subscribedPaths.delete(path);
+      this.subscriptions.delete(path);
+      this.roles.delete(path);
       return;
     }
-
     try {
       await this.syncManager.waitForSync(docId);
     } catch {
-      this.subscribedPaths.delete(path);
+      if (this.subscriptions.get(path) === subscription) this.unsubscribe(path);
       return;
     }
+    if (this.subscriptions.get(path) !== subscription) return;
 
-    if (!this.subscribedPaths.has(path)) return;
-    if (this.observers.has(path)) return;
-
-    const nodesMap = docHandle.doc.getMap<Y.Map<unknown>>("nodes");
-    const edgesMap = docHandle.doc.getMap<Y.Map<unknown>>("edges");
-
-    const diskPath = toLocalPath(path);
-    if (role === "host") {
-      const file = getFileByPath(this.vault, diskPath);
-      if (file) {
-        const content = await this.vault.read(file);
-        const data = parseCanvas(content);
-        this.recentLocalEdits.add(path);
-        docHandle.doc.transact(() => {
-          this.applyCanvasToYMaps(nodesMap, edgesMap, data);
-        });
-        this.recentLocalEdits.delete(path);
+    const nodes = handle.doc.getMap<Y.Map<unknown>>("nodes");
+    const edges = handle.doc.getMap<Y.Map<unknown>>("edges");
+    const properties = handle.doc.getMap<unknown>("properties");
+    const meta = handle.doc.getMap("meta");
+    if (role === "host" && !meta.get("seeded")) {
+      const file = getFileByPath(this.vault, toLocalPath(path));
+      const data = file ? parseCanvas(await this.vault.read(file)) : null;
+      if (this.subscriptions.get(path) !== subscription) return;
+      if (data) {
+        this.lastLocalData.set(path, data);
+        handle.doc.transact(() => {
+          applyItems(nodes, data.nodes, {});
+          applyItems(edges, data.edges, {});
+          applyProperties(properties, data.properties, {});
+          applyOrder(handle.doc.getMap("nodeOrder"), data.nodeOrder, []);
+          applyOrder(handle.doc.getMap("edgeOrder"), data.edgeOrder, []);
+          meta.set("seeded", true);
+        }, this);
       }
-    } else {
-      if (nodesMap.size > 0 || edgesMap.size > 0) {
-        const content = serializeCanvas(nodesMap, edgesMap);
-        await this.writeToDisk(path, content);
-      }
+    } else if (meta.get("seeded") || nodes.size > 0 || edges.size > 0) {
+      await this.writeToDisk(path, subscription);
+      if (this.subscriptions.get(path) !== subscription) return;
     }
 
-    const observer = () => {
-      if (this.recentLocalEdits.has(path)) return;
-      this.scheduleDiskWrite(path, nodesMap, edgesMap);
+    const observer = (_events: unknown, transaction: Y.Transaction) => {
+      if (transaction.origin === this) return;
+      this.scheduleDiskWrite(path, subscription);
     };
-    nodesMap.observeDeep(observer);
-    edgesMap.observeDeep(observer);
+    nodes.observeDeep(observer);
+    edges.observeDeep(observer);
+    properties.observeDeep(observer);
+    handle.doc.getMap("nodeOrder").observe(observer);
+    handle.doc.getMap("edgeOrder").observe(observer);
+    meta.observe(observer);
     this.observers.set(path, () => {
-      nodesMap.unobserveDeep(observer);
-      edgesMap.unobserveDeep(observer);
+      nodes.unobserveDeep(observer);
+      edges.unobserveDeep(observer);
+      properties.unobserveDeep(observer);
+      handle.doc.getMap("nodeOrder").unobserve(observer);
+      handle.doc.getMap("edgeOrder").unobserve(observer);
+      meta.unobserve(observer);
     });
   }
 
   unsubscribe(rawPath: string): void {
     const path = toCanonicalPath(normalizePath(rawPath));
     this.subscribedPaths.delete(path);
+    this.subscriptions.delete(path);
+    this.roles.delete(path);
+    this.subscribing.delete(path);
     const timer = this.writeTimers.get(path);
-    if (timer) {
-      clearTimeout(timer);
-      this.writeTimers.delete(path);
-    }
-    const unobserve = this.observers.get(path);
-    if (unobserve) {
-      unobserve();
-      this.observers.delete(path);
-    }
+    if (timer) clearTimeout(timer);
+    this.writeTimers.delete(path);
+    this.observers.get(path)?.();
+    this.observers.delete(path);
+    this.lastLocalData.delete(path);
     this.syncManager.releaseDoc(`${CANVAS_DOC_PREFIX}${path}`);
   }
 
   async handleLocalModify(rawPath: string): Promise<void> {
     const path = toCanonicalPath(normalizePath(rawPath));
-    if (this.recentDiskWrites.has(path)) return;
-    if (!this.subscribedPaths.has(path)) return;
-
-    const docId = `${CANVAS_DOC_PREFIX}${path}`;
-    const docHandle = this.syncManager.getDoc(docId);
-    if (!docHandle) return;
-
+    const subscription = this.subscriptions.get(path);
+    if (!subscription) return;
+    const handle = this.syncManager.getDoc(`${CANVAS_DOC_PREFIX}${path}`);
     const file = getFileByPath(this.vault, toLocalPath(path));
-    if (!file) return;
-
-    const content = await this.vault.read(file);
-    const data = parseCanvas(content);
-    const nodesMap = docHandle.doc.getMap<Y.Map<unknown>>("nodes");
-    const edgesMap = docHandle.doc.getMap<Y.Map<unknown>>("edges");
-
-    this.recentLocalEdits.add(path);
-    docHandle.doc.transact(() => {
-      this.applyCanvasToYMaps(nodesMap, edgesMap, data);
-    });
-    this.recentLocalEdits.delete(path);
+    if (!handle || !file) return;
+    const data = parseCanvas(await this.vault.read(file));
+    if (!data || this.subscriptions.get(path) !== subscription) return;
+    const previous = this.lastLocalData.get(path) ?? emptyCanvas();
+    if (equal(data, previous)) return;
+    // Apply the user's delta, not the entire saved snapshot. The view may still
+    // be missing a remote card/position that arrived during the debounce window.
+    handle.doc.transact(() => {
+      applyItems(handle.doc.getMap("nodes"), data.nodes, previous.nodes);
+      applyItems(handle.doc.getMap("edges"), data.edges, previous.edges);
+      applyProperties(handle.doc.getMap("properties"), data.properties, previous.properties);
+      applyOrder(handle.doc.getMap("nodeOrder"), data.nodeOrder, previous.nodeOrder);
+      applyOrder(handle.doc.getMap("edgeOrder"), data.edgeOrder, previous.edgeOrder);
+      const meta = handle.doc.getMap("meta");
+      if (this.roles.get(path) === "host" && !meta.get("seeded")) meta.set("seeded", true);
+    }, this);
+    this.lastLocalData.set(path, data);
+    this.scheduleDiskWrite(path, subscription);
   }
 
   isRecentDiskWrite(rawPath: string): boolean {
@@ -203,91 +255,68 @@ export class CanvasSync {
   }
 
   destroy(): void {
-    for (const timer of this.writeTimers.values()) {
-      clearTimeout(timer);
-    }
-    this.writeTimers.clear();
-    for (const [, unobserve] of this.observers) {
-      unobserve();
-    }
-    this.observers.clear();
-    for (const path of [...this.subscribedPaths]) {
-      this.syncManager.releaseDoc(`${CANVAS_DOC_PREFIX}${path}`);
-    }
-    this.subscribedPaths.clear();
+    for (const path of [...this.subscribedPaths]) this.unsubscribe(path);
     this.recentDiskWrites.clear();
-    this.recentLocalEdits.clear();
-    this.lastWrittenContent.clear();
   }
 
-  private applyCanvasToYMaps(
-    nodesMap: Y.Map<Y.Map<unknown>>,
-    edgesMap: Y.Map<Y.Map<unknown>>,
-    data: CanvasData,
-  ): void {
-    const existingNodeIds = new Set(nodesMap.keys());
-    for (const [id, node] of Object.entries(data.nodes)) {
-      let yNode = nodesMap.get(id);
-      if (!yNode) {
-        yNode = new Y.Map<unknown>();
-        nodesMap.set(id, yNode);
-      }
-      applyToYMap(yNode, node);
-      existingNodeIds.delete(id);
-    }
-    for (const id of existingNodeIds) {
-      nodesMap.delete(id);
-    }
-
-    const existingEdgeIds = new Set(edgesMap.keys());
-    for (const [id, edge] of Object.entries(data.edges)) {
-      let yEdge = edgesMap.get(id);
-      if (!yEdge) {
-        yEdge = new Y.Map<unknown>();
-        edgesMap.set(id, yEdge);
-      }
-      applyToYMap(yEdge, edge);
-      existingEdgeIds.delete(id);
-    }
-    for (const id of existingEdgeIds) {
-      edgesMap.delete(id);
-    }
-  }
-
-  private scheduleDiskWrite(
-    path: string,
-    nodesMap: Y.Map<Y.Map<unknown>>,
-    edgesMap: Y.Map<Y.Map<unknown>>,
-  ): void {
-    const existing = this.writeTimers.get(path);
-    if (existing) clearTimeout(existing);
+  private scheduleDiskWrite(path: string, subscription: object): void {
+    const timer = this.writeTimers.get(path);
+    if (timer) clearTimeout(timer);
     this.writeTimers.set(
       path,
       setTimeout(() => {
         this.writeTimers.delete(path);
-        const content = serializeCanvas(nodesMap, edgesMap);
-        void this.writeToDisk(path, content);
+        void this.writeToDisk(path, subscription);
       }, DEBOUNCE_MS),
     );
   }
 
-  private async writeToDisk(path: string, content: string): Promise<void> {
-    if (this.lastWrittenContent.get(path) === content) return;
-    const diskPath = toLocalPath(path);
-    this.recentDiskWrites.add(path);
-    this.fileOpsManager.mutePathEvents(diskPath);
-    try {
-      const parentDir = diskPath.substring(0, diskPath.lastIndexOf("/"));
-      if (parentDir) await ensureFolder(this.vault, parentDir);
-      await this.vault.adapter.write(diskPath, content);
-      this.lastWrittenContent.set(path, content);
-    } catch {
-      new Notice(`Live Share: failed to write canvas ${diskPath}`);
-    } finally {
-      setTimeout(() => {
-        this.recentDiskWrites.delete(path);
-        this.fileOpsManager.unmutePathEvents(diskPath);
-      }, VAULT_EVENT_SETTLE_MS);
-    }
+  private async writeToDisk(path: string, subscription: object): Promise<void> {
+    const task = (this.writeQueues.get(path) ?? Promise.resolve()).then(async () => {
+      if (this.subscriptions.get(path) !== subscription) return;
+      const handle = this.syncManager.getDoc(`${CANVAS_DOC_PREFIX}${path}`);
+      if (!handle) return;
+      const nodes = handle.doc.getMap<Y.Map<unknown>>("nodes");
+      const edges = handle.doc.getMap<Y.Map<unknown>>("edges");
+      if (!handle.doc.getMap("meta").get("seeded") && nodes.size === 0 && edges.size === 0) return;
+      const content = JSON.stringify(
+        {
+          ...handle.doc.getMap("properties").toJSON(),
+          nodes: orderedItems(nodes, handle.doc.getMap("nodeOrder")),
+          edges: orderedItems(edges, handle.doc.getMap("edgeOrder")),
+        },
+        null,
+        "\t",
+      );
+      const diskPath = toLocalPath(path);
+      const data = parseCanvas(content);
+      if (!data) return;
+      const file = getFileByPath(this.vault, diskPath);
+      if (file && (await this.vault.read(file)) === content) {
+        this.lastLocalData.set(path, data);
+        return;
+      }
+      if (this.subscriptions.get(path) !== subscription) return;
+      this.recentDiskWrites.add(path);
+      this.fileOpsManager.mutePathEvents(diskPath);
+      try {
+        const parentDir = diskPath.substring(0, diskPath.lastIndexOf("/"));
+        if (parentDir) await ensureFolder(this.vault, parentDir);
+        if (this.subscriptions.get(path) !== subscription) return;
+        await this.vault.adapter.write(diskPath, content);
+        if (this.subscriptions.get(path) === subscription) this.lastLocalData.set(path, data);
+      } finally {
+        setTimeout(() => {
+          this.recentDiskWrites.delete(path);
+          this.fileOpsManager.unmutePathEvents(diskPath);
+        }, VAULT_EVENT_SETTLE_MS);
+      }
+    });
+    const settled = task.catch(() => {
+      new Notice(`Live Share: failed to write canvas ${toLocalPath(path)}`);
+    });
+    this.writeQueues.set(path, settled);
+    await settled;
+    if (this.writeQueues.get(path) === settled) this.writeQueues.delete(path);
   }
 }

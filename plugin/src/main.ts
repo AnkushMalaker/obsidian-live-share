@@ -669,13 +669,9 @@ export default class LiveSharePlugin extends Plugin {
 
     this.explorerIndicators = new ExplorerIndicators();
     this.canvasSync = new CanvasSync(this.app.vault, this.syncManager, this.fileOpsManager);
-    const entries = this.manifestManager.getEntries();
-    const role = this.settings.role === "host" ? "host" : "guest";
-    for (const [path] of entries) {
-      if (isTextFile(path) && path.endsWith(".canvas")) {
-        void this.canvasSync.subscribe(path, role);
-      }
-    }
+    // startAll runs after the manifest loads; its routing also covers new files,
+    // renames, removal, and reconnects instead of taking this early empty snapshot.
+    this.backgroundSync.setCanvasSync(this.canvasSync);
 
     this.presenceManager = new PresenceManager({
       getUserId: () => this.userId,

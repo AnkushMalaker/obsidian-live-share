@@ -7,6 +7,7 @@ import {
   VAULT_EVENT_SETTLE_MS,
   ensureFolder,
   getFileByPath,
+  isCanvasFile,
   isTextFile,
   normalizeLineEndings,
   normalizePath,
@@ -154,6 +155,10 @@ export class ManifestManager {
       }
 
       if (options?.skipText && !entry.binary && isTextFile(path)) continue;
+
+      // CanvasSync hydrates the structured document, including empty boards.
+      // A separate Y.Text document can be empty or contain invalid merged JSON.
+      if (isCanvasFile(path)) continue;
 
       const localFile = getFileByPath(this.vault, diskPath);
 
