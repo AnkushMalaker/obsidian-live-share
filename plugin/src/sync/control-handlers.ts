@@ -27,6 +27,17 @@ export function registerControlHandlers(plugin: LiveSharePlugin): void {
   if (!channel) return;
 
   plugin.fileOpsManager.setSender((op) => {
+    if (op.type === "delete" || op.type === "rename" || op.type === "folder-create") {
+      plugin.logger.log(
+        "file-op-send",
+        JSON.stringify({
+          ...op,
+          clientId: plugin.settings.clientId,
+          displayName: plugin.settings.displayName,
+          role: plugin.settings.role,
+        }),
+      );
+    }
     if (op.type === "chunk-start" || op.type === "chunk-data" || op.type === "chunk-end") {
       channel.send({
         ...op,
@@ -45,6 +56,12 @@ export function registerControlHandlers(plugin: LiveSharePlugin): void {
       "newPath" in op ? op.newPath : null,
     ].filter(Boolean) as string[];
     if (paths.length === 0) return;
+    if (op.type === "delete" || op.type === "rename" || op.type === "folder-create") {
+      plugin.logger.log(
+        "file-op-receive",
+        JSON.stringify({ ...op, receiver: plugin.settings.clientId, role: plugin.settings.role }),
+      );
+    }
     const isRename = op.type === "rename";
     if (isRename) {
       if (!paths.some((path) => plugin.manifestManager.isSharedPath(path))) return;

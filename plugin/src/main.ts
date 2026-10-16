@@ -1,5 +1,5 @@
 import type { EditorView } from "@codemirror/view";
-import { MarkdownView, Menu, Notice, Plugin, TFile, requestUrl } from "obsidian";
+import { MarkdownView, Menu, Notice, Plugin, TFile, TFolder, requestUrl } from "obsidian";
 
 import { minimatch } from "minimatch";
 import { DebugLogger } from "./debug-logger";
@@ -87,6 +87,7 @@ export default class LiveSharePlugin extends Plugin {
 
   private registerManifestChangeHandler() {
     this.manifestManager.setManifestChangeHandler((added, removed, updated) => {
+      this.logger.log("manifest-change", JSON.stringify({ added, removed, updated }));
       this.manifestHandlerQueue = this.manifestHandlerQueue
         .then(async () => {
           const renamedOldPaths = new Set<string>();
@@ -99,7 +100,9 @@ export default class LiveSharePlugin extends Plugin {
                 const localNew = toLocalPath(newPath);
                 const oldFile = this.app.vault.getAbstractFileByPath(localOld);
                 const newFile = this.app.vault.getAbstractFileByPath(localNew);
-                if (oldFile && !newFile) {
+                if (oldFile instanceof TFolder || newFile instanceof TFolder) continue;
+                if (this.manifestManager.getEntries().get(newPath)?.directory) continue;
+                if (oldFile instanceof TFile && !newFile) {
                   renamedOldPaths.add(oldPath);
                   renamedNewPaths.add(newPath);
                   this.fileOpsManager.mutePathEvents(localOld);
@@ -122,7 +125,7 @@ export default class LiveSharePlugin extends Plugin {
                   }
                   break;
                 }
-                if (!oldFile && newFile) {
+                if (!oldFile && newFile instanceof TFile) {
                   renamedOldPaths.add(oldPath);
                   renamedNewPaths.add(newPath);
                   if (isTextFile(oldPath)) {
@@ -157,7 +160,14 @@ export default class LiveSharePlugin extends Plugin {
           for (const path of actuallyRemoved) {
             this.backgroundSync.onFileRemoved(path);
             const file = this.app.vault.getAbstractFileByPath(toLocalPath(path));
-            if (file) await this.app.fileManager.trashFile(file);
+            // A missing inventory marker never authorizes recursive deletion.
+            // Intentional folder deletes arrive as explicit file operations.
+            if (file instanceof TFile) {
+              this.logger.log("manifest-trash", JSON.stringify({ path, kind: "file" }));
+              await this.app.fileManager.trashFile(file);
+            } else if (file) {
+              this.logger.log("manifest-folder-kept", JSON.stringify({ path }));
+            }
           }
           if (actuallyRemoved.length > 0)
             this.notify(`Live Share: removed ${actuallyRemoved.length} file(s)`);
@@ -256,6 +266,15 @@ export default class LiveSharePlugin extends Plugin {
       this.app.vault,
       this.settings.debugLogPath,
       this.settings.debugLogging,
+    );
+    this.logger.log(
+      "session",
+      JSON.stringify({
+        event: "loaded",
+        clientId: this.settings.clientId,
+        displayName: this.settings.displayName,
+        role: this.settings.role,
+      }),
     );
     this.connectionStateUnsub = this.connectionState.onChange(() => this.updateStatusBar());
 

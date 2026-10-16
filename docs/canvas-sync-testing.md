@@ -73,3 +73,19 @@ Earlier build-specific traces are stored with local build artifacts. Their
 results apply to those exact builds; rerun the relevant cases after changing
 save/reload behavior. Temporary diagnostics should record only disposable test
 content and be removed when testing finishes.
+
+## Folder inventory regression
+
+Directory entries in the manifest describe empty folders. Retiring a marker when
+saving its first child, receiving a late folder-create message, or republishing
+an inventory must not trash or rename a physical folder. Intentional folder
+operations use explicit file-operation messages. `folder-marker-loss.test.ts`
+exercises the real manifest manager and plugin callback, including a two-document
+peer update, inventory refresh, and folder rename collisions.
+
+Local diagnostics can be enabled in plugin settings. Use
+`.obsidian/plugins/live-share/debug.log` to keep the log out of shared notes.
+The log identifies the client and records inventory changes, outgoing/incoming
+folder operations, and observed local deletes. It records paths and operation
+metadata rather than note bodies or connection secrets. A vault delete event
+identifies the observing client; it cannot identify the originating OS process.

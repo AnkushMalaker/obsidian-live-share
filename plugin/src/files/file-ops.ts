@@ -1,4 +1,4 @@
-import { type FileManager, Notice, type TAbstractFile, TFile, type Vault } from "obsidian";
+import { type FileManager, Notice, type TAbstractFile, TFile, TFolder, type Vault } from "obsidian";
 import { OfflineQueue } from "../sync/offline-queue";
 import type { FileOp } from "../types";
 import {
@@ -245,7 +245,11 @@ export class FileOpsManager {
               if (!this.vault.getAbstractFileByPath(op.newPath)) throw renameErr;
             }
           } else if (file && alreadyExists) {
-            await this.fileManager.trashFile(file);
+            if (file instanceof TFolder || alreadyExists instanceof TFolder) {
+              new Notice(`Live Share: folder rename conflict at ${op.newPath}; both folders kept`);
+            } else {
+              await this.fileManager.trashFile(file);
+            }
           }
           break;
         }

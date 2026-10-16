@@ -68,6 +68,15 @@ export function registerVaultEvents(plugin: LiveSharePlugin): void {
       const run = () => {
         if (!plugin.manifestManager.isSharedPath(file.path)) return;
         if (plugin.fileOpsManager.isPathMuted(file.path)) return;
+        plugin.logger.log(
+          "vault-delete",
+          JSON.stringify({
+            path: file.path,
+            kind: file instanceof TFile ? "file" : "folder",
+            clientId: plugin.settings.clientId,
+            role: plugin.settings.role,
+          }),
+        );
         plugin.fileOpsManager.onFileDelete(file);
         if (plugin.settings.role === "host") {
           plugin.backgroundSync.onFileRemoved(file.path);

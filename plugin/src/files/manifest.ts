@@ -232,8 +232,11 @@ export class ManifestManager {
       const updated: string[] = [];
       event.changes.keys.forEach((change, key) => {
         if (change.action === "add") added.push(key);
-        else if (change.action === "delete") removed.push(key);
-        else if (change.action === "update") updated.push(key);
+        else if (change.action === "delete" && !change.oldValue?.directory) {
+          // Directory entries represent empty-folder inventory. Removing that
+          // marker when a child appears is not a request to delete the folder.
+          removed.push(key);
+        } else if (change.action === "update") updated.push(key);
       });
       if (added.length > 0 || removed.length > 0 || updated.length > 0) {
         callback(added, removed, updated);
@@ -279,6 +282,7 @@ export class ManifestManager {
     if (!this.manifest || !this.isSharedPath(rawPath)) return;
     const path = toCanonicalPath(normalizePath(rawPath));
     if (this.manifest.has(path)) return;
+    if ([...this.manifest.keys()].some((entry) => entry.startsWith(`${path}/`))) return;
     this.manifest.set(path, { hash: "", size: 0, mtime: 0, directory: true });
   }
 
