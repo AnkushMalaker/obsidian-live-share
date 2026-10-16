@@ -44,3 +44,34 @@ Use disposable canvases rather than changing an existing board:
 - Verify that extra root metadata and the original node ordering are preserved.
 
 The relay API and deployment do not change for this fix. Canvas files use the existing `__canvas__:` document namespace; they are excluded from the ordinary text-document writer.
+
+## Plain text card overwrite regression
+
+The first Canvas fix (`d07cd62`) scheduled a write after a local save and compared
+the resulting JSON as bytes. Obsidian and Live Share serialize the same graph
+with different formatting and key order, so Live Share wrote the unchanged graph
+back to disk. That external write could reload a card containing newer text.
+
+Reproduce with a disposable text card open on two clients:
+
+1. Change its text to `Hi, my name is `.
+2. After about 2.6 seconds, append `John.`. Canvas has separate debounced saves
+   for the text editor and the board, so the prefix reaches disk first.
+3. At about five seconds, the redundant Live Share write restores the prefix,
+   removing `John.` from the still-open editor.
+
+The fix compares parsed Canvas data, ignoring whitespace and object-key order
+while preserving array order. Equivalent graphs cause no disk write. Actual
+merged changes still propagate. The automated regression models an unsaved
+editor being reloaded by an external adapter write and confirms that the next
+save reaches the other client. A second case covers formatting/key-order changes
+during initial hydration.
+
+Live verification on the two Macs reproduced the disappearing suffix before
+the fix. With the fixed build installed on both, the same 2.6-second typing
+sequence passed in both directions for plain cards and embedded Markdown notes.
+The suffix remained in the editor and the complete text reached both clients.
+
+This does not change plain card text from a whole-string Y.Map property into a
+character-level Y.Text. Simultaneous edits to the same card's text remain a
+separate collaboration limitation.

@@ -156,6 +156,54 @@ describe("Canvas session regressions", () => {
     }
   });
 
+  it("does not echo a local save back over newer, unsaved text in an open card", async () => {
+    const host = make();
+    const guest = make();
+    await host.canvas.subscribe(path, "host");
+    link(host, guest);
+    await guest.canvas.subscribe(path, "guest");
+
+    const prefix = { ...seed, nodes: [{ ...seed.nodes[0], text: "Hi, my name is " }] };
+    // Obsidian has saved the prefix, but its text-card editor already contains
+    // the next word. An external adapter write reloads that editor from disk.
+    host.files.set(path, JSON.stringify(prefix));
+    await host.canvas.handleLocalModify(path);
+    let editorText = "Hi, my name is John.";
+    host.vault.adapter.write.mockImplementation(async (name, content) => {
+      host.files.set(name, content);
+      editorText = JSON.parse(content).nodes[0].text;
+    });
+    await vi.advanceTimersByTimeAsync(1100);
+
+    expect(editorText).toBe("Hi, my name is John.");
+    expect(host.vault.adapter.write).not.toHaveBeenCalled();
+    expect(JSON.parse(guest.files.get(path)!).nodes[0].text).toBe("Hi, my name is ");
+
+    host.files.set(
+      path,
+      JSON.stringify({ ...prefix, nodes: [{ ...prefix.nodes[0], text: editorText }] }),
+    );
+    await host.canvas.handleLocalModify(path);
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(JSON.parse(guest.files.get(path)!).nodes[0].text).toBe(editorText);
+  });
+
+  it("ignores JSON formatting and object-key order when hydrating an unchanged canvas", async () => {
+    const host = make();
+    const guest = make();
+    await host.canvas.subscribe(path, "host");
+    link(host, guest);
+    // Canvas extensions and core Canvas can serialize the same graph differently.
+    const reordered = {
+      edges: [],
+      metadata: seed.metadata,
+      nodes: [Object.fromEntries(Object.entries(seed.nodes[0]).reverse())],
+    };
+    guest.files.set(path, JSON.stringify(reordered, null, 2));
+    await guest.canvas.subscribe(path, "guest");
+    expect(guest.vault.adapter.write).not.toHaveBeenCalled();
+  });
+
   it("does not erase the shared board when a temporary save contains invalid JSON", async () => {
     const host = make();
     await host.canvas.subscribe(path, "host");

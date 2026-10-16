@@ -51,7 +51,25 @@ function parseCanvas(content: string): CanvasData | null {
 }
 
 function equal(a: unknown, b: unknown): boolean {
-  return JSON.stringify(a) === JSON.stringify(b);
+  if (a === b) return true;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    return (
+      Array.isArray(a) &&
+      Array.isArray(b) &&
+      a.length === b.length &&
+      a.every((value, index) => equal(value, b[index]))
+    );
+  }
+  if (!a || !b || typeof a !== "object" || typeof b !== "object") return false;
+  const left = a as Record<string, unknown>;
+  const right = b as Record<string, unknown>;
+  const keys = Object.keys(left);
+  return (
+    keys.length === Object.keys(right).length &&
+    keys.every(
+      (key) => Object.prototype.hasOwnProperty.call(right, key) && equal(left[key], right[key]),
+    )
+  );
 }
 
 function applyProperties(
@@ -292,7 +310,10 @@ export class CanvasSync {
       const data = parseCanvas(content);
       if (!data) return;
       const file = getFileByPath(this.vault, diskPath);
-      if (file && (await this.vault.read(file)) === content) {
+      // Obsidian serializes Canvas differently from our shared document. An
+      // equivalent rewrite still reloads an open card and can discard text
+      // typed since its last save. Only write actual graph changes.
+      if (file && equal(parseCanvas(await this.vault.read(file)), data)) {
         this.lastLocalData.set(path, data);
         return;
       }
