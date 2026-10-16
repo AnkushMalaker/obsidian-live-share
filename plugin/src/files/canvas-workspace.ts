@@ -6,7 +6,11 @@ export interface CanvasWritePreparation {
     applySnapshot: (content: string, previous: string) => boolean,
   ): boolean;
   hasPendingChanges(path: string): boolean;
-  applyMergedData(path: string, content: string): (() => void) | undefined;
+  applyMergedData(
+    path: string,
+    content: string,
+    acceptSerialization: (content: string) => boolean,
+  ): { content: string; rollback: () => void } | undefined;
 }
 
 // Canvas save state is not exported in Obsidian's public types.
@@ -50,8 +54,8 @@ export class CanvasWorkspace implements CanvasWritePreparation {
   hasPendingChanges(path: string): boolean {
     return this.views(path).some((view) => {
       if (view.saving || this.pendingText(view)) return true;
-      if (!view.dirty) return false;
       const captured = this.captured.get(view);
+      if (!view.dirty && !captured) return false;
       return (
         !captured ||
         captured.content !== view.getViewData() ||
@@ -93,27 +97,45 @@ export class CanvasWorkspace implements CanvasWritePreparation {
     return true;
   }
 
-  applyMergedData(path: string, content: string): (() => void) | undefined {
+  applyMergedData(
+    path: string,
+    content: string,
+    acceptSerialization: (content: string) => boolean,
+  ): { content: string; rollback: () => void } | undefined {
     const views = this.views(path);
     if (!views.length) return undefined;
-    const previous = views.map((view) => ({ view, baseline: view.lastSavedData }));
+    const previous = views.map((view) => ({
+      view,
+      baseline: view.lastSavedData,
+      content: view.getViewData(),
+    }));
+    for (const view of views) view.setViewData(content, false);
+    const nativeContent = views[0].getViewData();
+    if (
+      !acceptSerialization(nativeContent) ||
+      views.some((view) => view.getViewData() !== nativeContent)
+    ) {
+      for (const { view, content } of previous) view.setViewData(content, false);
+      throw new Error("Canvas views cannot serialize the shared graph without changes");
+    }
     for (const view of views) {
-      view.setViewData(content, false);
-      // Match TextFileView.save's optimistic baseline. Otherwise reverting a
-      // visible remote edit can equal the old lastSavedData and save() silently
-      // drops it. The matching baseline also prevents our watcher event from
-      // reloading a leaf that has accumulated newer input during this write.
-      view.lastSavedData = content;
+      // Native requestSave callbacks can still run after dirty is cleared. Use
+      // their exact serialization so an unchanged save is a no-op. Writing those
+      // same bytes also makes the filesystem watcher skip sibling reloads.
+      view.lastSavedData = nativeContent;
       view.dirty = false;
     }
-    return () => {
-      for (const { view, baseline } of previous) {
-        // A newer native save owns its own baseline and recovery.
-        if (view.file?.path !== path || view.lastSavedData !== content || view.saving) continue;
-        view.lastSavedData = baseline;
-        view.dirty = true;
-        view.requestSave?.();
-      }
+    return {
+      content: nativeContent,
+      rollback: () => {
+        for (const { view, baseline } of previous) {
+          if (view.file?.path !== path || view.lastSavedData !== nativeContent || view.saving)
+            continue;
+          view.lastSavedData = baseline;
+          view.dirty = true;
+          view.requestSave?.();
+        }
+      },
     };
   }
 }

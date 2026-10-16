@@ -359,9 +359,11 @@ export class CanvasSync {
       let previous = this.lastLocalData.get(path);
       for (let attempt = 0; attempt < 2; attempt++) {
         previous = this.lastLocalData.get(path);
+        const localRead = this.localReads.get(path);
         existing = file ? parseCanvas(await this.vault.read(file)) : null;
         if (this.subscriptions.get(path) !== subscription) return;
-        if (previous === this.lastLocalData.get(path)) break;
+        if (previous === this.lastLocalData.get(path) && localRead === this.localReads.get(path))
+          break;
         if (attempt === 1) {
           this.scheduleDiskWrite(path, subscription);
           return;
@@ -375,7 +377,7 @@ export class CanvasSync {
         this.scheduleDiskWrite(path, subscription);
         return;
       }
-      const content = this.serialize(handle.doc);
+      let content = this.serialize(handle.doc);
       const data = parseCanvas(content);
       if (!data) return;
       // Obsidian serializes Canvas differently from our shared document. An
@@ -393,12 +395,19 @@ export class CanvasSync {
         if (this.subscriptions.get(path) !== subscription) return;
         // Once this graph becomes visible it is the user's edit baseline, even
         // though persistence is still pending. A deliberate revert must count.
-        restoreViews = this.localViews?.applyMergedData(diskPath, content);
-        if (restoreViews) this.lastLocalData.set(path, data);
+        const prepared = this.localViews?.applyMergedData(diskPath, content, (nativeContent) =>
+          equal(parseCanvas(nativeContent), data),
+        );
+        if (prepared) {
+          content = prepared.content;
+          restoreViews = prepared.rollback;
+          this.lastLocalData.set(path, data);
+        }
         await this.vault.adapter.write(diskPath, content);
         if (this.subscriptions.get(path) === subscription) {
           this.lastLocalData.set(path, data);
-          if (this.serialize(handle.doc) !== content) this.scheduleDiskWrite(path, subscription);
+          if (!equal(parseCanvas(this.serialize(handle.doc)), data))
+            this.scheduleDiskWrite(path, subscription);
         }
       } catch (error) {
         restoreViews?.();

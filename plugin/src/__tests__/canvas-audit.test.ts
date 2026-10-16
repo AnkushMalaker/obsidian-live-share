@@ -75,38 +75,6 @@ describe("Canvas asynchronous saves", () => {
     expect(doc.getMap("nodes").has("seed")).toBe(true);
   });
 
-  it("preserves the second dirty view when the first save emits Obsidian's modify/reload event", async () => {
-    const leaves: any[] = [];
-    const host = make(undefined, new CanvasWorkspace({ getLeavesOfType: () => leaves } as any));
-    await host.canvas.subscribe(path, "host");
-    const first = mountView(host, leaves);
-    const second = mountView(host, leaves);
-    first.data.nodes[0].x = 100;
-    second.data.nodes[0].y = 200;
-    first.dirty = second.dirty = true;
-    // Q4.onModify/loadFileInternal in installed Obsidian 1.14.4 reloads a
-    // different view even if it is dirty; Canvas sets isPlaintext=false.
-    first.save = async function () {
-      this.dirty = false;
-      this.lastSavedData = this.getViewData();
-      host.files.set(path, this.lastSavedData);
-      second.lastSavedData = this.lastSavedData;
-      second.data = JSON.parse(this.lastSavedData);
-      await host.canvas.handleLocalModify(path);
-    };
-    host.sync
-      .getDoc(`__canvas__:${path}`)
-      .doc.getMap<Y.Map<unknown>>("nodes")
-      .get("seed")!
-      .set("width", 400);
-    await vi.advanceTimersByTimeAsync(2200);
-    expect(JSON.parse(host.files.get(path)!).nodes[0]).toMatchObject({
-      x: 100,
-      y: 200,
-      width: 400,
-    });
-  });
-
   it("renders a remote update that lands during the initial hydration write", async () => {
     const host = make();
     const guest = make(new Map());

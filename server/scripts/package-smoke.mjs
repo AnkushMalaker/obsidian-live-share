@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -104,6 +104,48 @@ try {
   const envPath = join(directory, ".env");
   const original = await readFile(envPath, "utf8");
   const config = parseEnv(original);
+  // Preserve apparent assignments inside a quoted multiline credential.
+  const preservationDirectory = join(root, "quoted configuration");
+  const { mkdir } = await import("node:fs/promises");
+  await mkdir(preservationDirectory);
+  const quoted =
+    'SERVER_PASSWORD="line one\nPORT=secret-part\nHOST=another-part\nline three"\nJWT_SECRET="test-secret"\nPORT=3000\n';
+  const quotedPath = join(preservationDirectory, ".env");
+  await writeFile(quotedPath, quoted, { mode: 0o600 });
+  // Startup can subsequently fail on its listener; configuration preservation
+  // must hold independently. A live child is shut down before continuing.
+  const quotedProcess = spawn(
+    cli,
+    [
+      "run",
+      "--directory",
+      preservationDirectory,
+      "--port",
+      String(await availablePort()),
+      "--host",
+      "127.0.0.1",
+    ],
+    { stdio: "ignore" },
+  );
+  const quotedExit = new Promise((resolve) => quotedProcess.once("exit", resolve));
+  try {
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline && (await readFile(quotedPath, "utf8")) === quoted)
+      await pause(25);
+    const updated = parseEnv(await readFile(quotedPath, "utf8"));
+    assert.equal(updated.SERVER_PASSWORD, parseEnv(quoted).SERVER_PASSWORD);
+    assert.equal(updated.JWT_SECRET, "test-secret");
+    assert.equal(updated.HOST, "127.0.0.1");
+    assert.notEqual(updated.PORT, "3000");
+  } finally {
+    if (quotedProcess.exitCode === null && quotedProcess.signalCode === null)
+      quotedProcess.kill("SIGTERM");
+    await Promise.race([quotedExit, pause(5000)]);
+    if (quotedProcess.exitCode === null && quotedProcess.signalCode === null) {
+      quotedProcess.kill("SIGKILL");
+      await quotedExit;
+    }
+  }
   assert.equal(config.PORT, String(port));
   assert.equal(config.SERVER_PASSWORD.length, 48);
   assert.equal(config.JWT_SECRET.length, 64);

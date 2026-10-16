@@ -11,10 +11,15 @@ rather than treated as an empty board.
 An incoming write captures all dirty Canvas leaves before any disk modification.
 Pending text-card buffers are flushed into their card models. Their deltas enter
 Yjs together; the merged graph is then applied to the leaves and written once.
+Open leaves supply native serialization, checked against the shared graph. The
+persisted bytes match native save baselines so queued unchanged autosaves skip
+their writes. A failed write restores the previous native baseline and requests
+a save of the current graph.
 The adapter does not save each leaf individually, because a native save can
 reload its siblings. A save already in flight or a new edit during asynchronous
 work postpones the incoming write. Disk reads are associated with their starting
-baseline, so a read that predates a completed local edit is retried. Yjs observers
+baseline and local-read generation; changed generations trigger a fresh read.
+Completed native saves are also detected through each captured view baseline. Yjs observers
 are attached before initial hydration.
 
 A fresh host subscription uses its local Canvas as authoritative, matching the
@@ -41,7 +46,10 @@ npm run build
 `canvas-regression.test.ts` covers Canvas routing and graph operations with
 independent Y.Docs. `canvas-audit.test.ts` covers delayed reads/writes, fresh host
 resume, sibling-view reloads, initial hydration, and native autosaves during a
-write. The shared fixture destroys released documents and models sibling reloads
+write. `canvas-native-ordering.test.ts` adds delayed modify-handler reads and
+queued autosaves with a newer sibling edit. `canvas-format-and-view.test.ts`
+covers empty/optional arrays, pending-write reversals, and write failures.
+The shared fixture destroys released documents and models sibling reloads
 on saves. These are controlled unit tests, not a complete Obsidian/relay
 integration environment. They do not by themselves establish encryption,
 permissions, guest rename, or all filesystem-watcher orderings.

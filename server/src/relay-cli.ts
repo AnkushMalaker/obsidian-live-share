@@ -55,10 +55,9 @@ function writeConfiguration(directory: string, config: Record<string, string>): 
     for (const key of ["PORT", "HOST"]) {
       if (config[key] === undefined || previous[key] === config[key]) continue;
       const line = `${key}=${JSON.stringify(config[key])}`;
-      const pattern = new RegExp(`^(?:export\\s+)?${key}\\s*=.*$`, "gm");
-      content = pattern.test(content)
-        ? content.replace(pattern, () => line)
-        : `${content.trimEnd()}\n${line}\n`;
+      // Later assignments override earlier ones. Appending avoids matching
+      // apparent assignments inside quoted multiline credentials.
+      content = `${content.trimEnd()}\n${line}\n`;
     }
   } else {
     content = `${Object.entries(config)
