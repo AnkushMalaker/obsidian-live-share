@@ -182,10 +182,10 @@ export function createApp(
 
 const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
-if (isMain) {
+export function startServer(): Promise<void> {
   const persistence = getDefaultPersistence();
   initAuditLog();
-  initRooms(persistence)
+  return initRooms(persistence)
     .then(async () => {
       const TLS_CERT = process.env.TLS_CERT;
       const TLS_KEY = process.env.TLS_KEY;
@@ -213,7 +213,7 @@ if (isMain) {
         console.error(`[server] invalid PORT: ${process.env.PORT}`);
         process.exit(1);
       }
-      server.listen(port, () => {
+      server.listen({ port, host: process.env.HOST || undefined }, () => {
         console.debug(`[server] listening on :${port}`);
       });
 
@@ -236,3 +236,5 @@ if (isMain) {
       process.exit(1);
     });
 }
+
+if (isMain) void startServer();

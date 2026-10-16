@@ -1,4 +1,4 @@
-name: Release Obsidian Plugin
+name: Release plugin and relay
 
 on:
   push:
@@ -34,6 +34,13 @@ jobs:
           cp main.js ../manifest.json styles.css live-share/
           zip -r live-share.zip live-share
 
+      - name: Package relay
+        working-directory: server
+        run: |
+          npm ci
+          npm run build
+          npm pack --ignore-scripts --pack-destination ..
+
       - name: Create release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -48,4 +55,4 @@ jobs:
             --generate-notes \
             $prerelease \
             --repo="$GITHUB_REPOSITORY" \
-            main.js ../manifest.json styles.css live-share.zip
+            main.js ../manifest.json styles.css live-share.zip ../obsidian-live-share-server-*.tgz

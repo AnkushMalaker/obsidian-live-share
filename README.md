@@ -9,6 +9,8 @@ Real-time collaborative editing for [Obsidian](https://obsidian.md). Share your 
 ```bash
 cd server && npm install && npm run build && npm start
 ```
+For an installable relay command and macOS background service, see the
+[relay package instructions](server/README.md).
 
 Runs on `http://localhost:3000`. Verify: `curl http://localhost:3000/healthz`
 
@@ -23,9 +25,9 @@ cd plugin && npm install && npm run build
 Copy into your vault:
 
 ```bash
-mkdir -p /path/to/vault/.obsidian/plugins/obsidian-live-share
+mkdir -p /path/to/vault/.obsidian/plugins/live-share
 cp plugin/main.js plugin/styles.css manifest.json \
-   /path/to/vault/.obsidian/plugins/obsidian-live-share/
+   /path/to/vault/.obsidian/plugins/live-share/
 ```
 
 Or install via [BRAT](https://github.com/TfTHacker/obsidian42-brat) for automatic updates.

@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- Node.js 18+
+- Node.js 20.19+
 - npm
 
 ## Install and Run
@@ -119,3 +119,10 @@ For production, ensure:
 3. Enable TLS via `TLS_CERT`/`TLS_KEY` or run behind a reverse proxy (nginx, Caddy)
 4. Use a process manager (systemd, pm2) to keep the server running
 5. Back up the `./data/` directory for room persistence
+
+## Installable relay CLI
+
+The server can be packed as an npm tarball and installed globally. The CLI
+creates persistent configuration and provides macOS service commands; see
+[the package instructions](../server/README.md). Its first-run default is port
+3865. The raw `npm start` and Docker configurations above retain port 3000.

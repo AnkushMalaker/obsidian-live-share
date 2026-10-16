@@ -4,14 +4,29 @@
   "private": true,
   "type": "module",
   "main": "dist/index.js",
+  "bin": {
+    "obsidian-live-share-relay": "bin/relay.mjs"
+  },
+  "files": [
+    "dist",
+    "bin",
+    ".env.example",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20.19"
+  },
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
+    "prepack": "npm run build",
+    "test:package": "npm run build && node scripts/package-smoke.mjs",
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "biome check .",
-    "format": "biome check --write ."
+    "format": "biome check --write .",
+    "test:service": "npm run build && node scripts/package-smoke.mjs --service"
   },
   "dependencies": {
     "cors": "^2.8.5",
