@@ -48,6 +48,24 @@ describe("Canvas asynchronous saves", () => {
     expect(JSON.parse(host.files.get(path)!).nodes[0]).toMatchObject({ x: 100, y: 200 });
   });
 
+  it("ingests a native save whose event was muted by the preceding shared write", async () => {
+    const host = make();
+    await host.canvas.subscribe(path, "host");
+    const node = host.sync
+      .getDoc(`__canvas__:${path}`)
+      .doc.getMap<Y.Map<unknown>>("nodes")
+      .get("seed")!;
+    node.set("y", 200);
+    await vi.advanceTimersByTimeAsync(1000);
+    const saved = JSON.parse(host.files.get(path)!);
+    saved.nodes[0].x = 100;
+    // VaultEvents suppresses this event while the shared writer mutes the path.
+    host.files.set(path, JSON.stringify(saved));
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(node.get("x")).toBe(100);
+    expect(JSON.parse(host.files.get(path)!).nodes[0]).toMatchObject({ x: 100, y: 200 });
+  });
+
   it("preserves edits made while the host plugin was unloaded and a guest retained the shared document", async () => {
     const host = make();
     const guest = make();
@@ -99,8 +117,8 @@ describe("Canvas asynchronous saves", () => {
     await host.canvas.subscribe(path, "host");
     const first = mountView(host, leaves);
     const second = mountView(host, leaves);
-    first.data.nodes[0].x = 100;
-    second.data.nodes[0].y = 200;
+    first.graph.nodes[0].x = 100;
+    second.graph.nodes[0].y = 200;
     first.dirty = second.dirty = true;
     const firstSave = vi.spyOn(first, "save");
     const secondSave = vi.spyOn(second, "save");
@@ -112,8 +130,8 @@ describe("Canvas asynchronous saves", () => {
     await vi.advanceTimersByTimeAsync(1100);
     expect(firstSave).not.toHaveBeenCalled();
     expect(secondSave).not.toHaveBeenCalled();
-    expect(first.data.nodes[0]).toMatchObject({ x: 100, y: 200, width: 400 });
-    expect(second.data).toEqual(first.data);
+    expect(first.graph.nodes[0]).toMatchObject({ x: 100, y: 200, width: 400 });
+    expect(second.graph).toEqual(first.graph);
   });
 
   it("gives native autosaves the merged graph while the adapter write is pending", async () => {
@@ -121,11 +139,11 @@ describe("Canvas asynchronous saves", () => {
     const host = make(undefined, new CanvasWorkspace({ getLeavesOfType: () => leaves } as any));
     await host.canvas.subscribe(path, "host");
     const view = mountView(host, leaves);
-    view.data.nodes[0].x = 100;
+    view.graph.nodes[0].x = 100;
     view.dirty = true;
     let finishWrite!: () => void;
     host.vault.adapter.write.mockImplementationOnce(async (_name, content) => {
-      expect(view.data.nodes[0]).toMatchObject({ x: 100, y: 200 });
+      expect(view.graph.nodes[0]).toMatchObject({ x: 100, y: 200 });
       await view.save();
       await new Promise<void>((resolve) => {
         finishWrite = resolve;

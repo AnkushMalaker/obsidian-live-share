@@ -66,22 +66,27 @@ export function mountView(c: ReturnType<typeof client>, leaves: any[]) {
     dirty: false,
     saving: false,
     lastSavedData: c.files.get(path)!,
-    data: JSON.parse(c.files.get(path)!),
+    data: c.files.get(path)!,
+    graph: JSON.parse(c.files.get(path)!),
     canvas: { nodes: new Map() },
     getViewData() {
-      return JSON.stringify(this.data);
+      return JSON.stringify(this.graph);
     },
     setViewData(content: string) {
-      this.data = JSON.parse(content);
+      this.graph = JSON.parse(content);
     },
     async save() {
       this.dirty = false;
       this.lastSavedData = this.getViewData();
+      this.data = this.lastSavedData;
       c.files.set(path, this.lastSavedData);
       for (const leaf of leaves) {
         if (leaf.view !== this && !leaf.view.saving) {
-          leaf.view.data = JSON.parse(this.lastSavedData);
           leaf.view.lastSavedData = this.lastSavedData;
+          if (leaf.view.data !== this.lastSavedData) {
+            leaf.view.data = this.lastSavedData;
+            leaf.view.setViewData(this.lastSavedData);
+          }
         }
       }
       await c.canvas.handleLocalModify(path);
@@ -91,8 +96,13 @@ export function mountView(c: ReturnType<typeof client>, leaves: any[]) {
   c.vault.adapter.write.mockImplementation(async (name, content) => {
     c.files.set(name, content);
     for (const leaf of leaves) {
-      leaf.view.data = JSON.parse(content);
-      leaf.view.lastSavedData = content;
+      if (!leaf.view.saving && leaf.view.lastSavedData !== content) {
+        leaf.view.lastSavedData = content;
+        if (leaf.view.data !== content) {
+          leaf.view.data = content;
+          leaf.view.setViewData(content);
+        }
+      }
     }
   });
   return view;

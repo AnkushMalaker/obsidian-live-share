@@ -46,13 +46,13 @@ describe("Canvas native save ordering", () => {
           finishLocalRead = resolve;
         }),
     );
-    view.data.nodes[0].x = 100;
+    view.graph.nodes[0].x = 100;
     view.dirty = true;
     const readingLocal = view.save();
     const local = host.files.get(path)!;
     finishIncomingRead(oldDisk);
     await vi.advanceTimersByTimeAsync(1);
-    expect(view.data.nodes[0].x).toBe(100);
+    expect(view.graph.nodes[0].x).toBe(100);
     finishLocalRead(local);
     await readingLocal;
     await vi.advanceTimersByTimeAsync(1100);
@@ -72,17 +72,18 @@ describe("Canvas native save ordering", () => {
       this.dirty = false;
       const content = this.getViewData();
       if (content === this.lastSavedData || this.lastSavedData === null) return;
+      this.data = content;
       this.lastSavedData = content;
       this.saving = true;
       host.files.set(path, content);
       if (!second.saving && second.lastSavedData !== content) {
         second.lastSavedData = content;
-        if (second.getViewData() !== content) second.data = JSON.parse(content);
+        if (second.getViewData() !== content) second.graph = JSON.parse(content);
       }
       this.saving = false;
       await host.canvas.handleLocalModify(path);
     };
-    first.data.nodes[0].x = 100;
+    first.graph.nodes[0].x = 100;
     first.dirty = true;
     // Native requestSave's existing two-second callback survives dirty=false.
     setTimeout(() => void first.save(), 2000);
@@ -92,11 +93,11 @@ describe("Canvas native save ordering", () => {
       .get("seed")!
       .set("y", 200);
     await vi.advanceTimersByTimeAsync(1100);
-    expect(first.data.nodes[0]).toMatchObject({ x: 100, y: 200 });
+    expect(first.graph.nodes[0]).toMatchObject({ x: 100, y: 200 });
     expect(first.getViewData()).toBe(first.lastSavedData);
-    second.data.nodes[0].height = 300;
+    second.graph.nodes[0].height = 300;
     second.dirty = true;
     await vi.advanceTimersByTimeAsync(1000);
-    expect(second.data.nodes[0].height).toBe(300);
+    expect(second.graph.nodes[0].height).toBe(300);
   });
 });

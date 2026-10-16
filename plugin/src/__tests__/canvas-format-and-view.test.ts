@@ -46,7 +46,7 @@ describe("Canvas formats and pending writes", () => {
     );
     await host.canvas.subscribe(path, "host");
     const view = mountView(host, leaves);
-    view.getViewData = () => JSON.stringify(view.data, null, "\t");
+    view.getViewData = () => JSON.stringify(view.graph, null, "\t");
     let finishWrite!: () => void;
     const adapterQueue = new Promise<void>((resolve) => {
       finishWrite = resolve;
@@ -55,6 +55,7 @@ describe("Canvas formats and pending writes", () => {
       this.dirty = false;
       const content = this.getViewData();
       if (content === this.lastSavedData || this.lastSavedData === null) return;
+      this.data = content;
       this.lastSavedData = content;
       this.saving = true;
       await adapterQueue;
@@ -66,7 +67,7 @@ describe("Canvas formats and pending writes", () => {
       await adapterQueue;
       host.files.set(name, content);
       if (view.lastSavedData !== content && !view.saving) {
-        view.data = JSON.parse(content);
+        view.graph = JSON.parse(content);
         view.lastSavedData = content;
       }
     });
@@ -76,9 +77,9 @@ describe("Canvas formats and pending writes", () => {
       .get("seed")!;
     node.set("x", 100);
     await vi.advanceTimersByTimeAsync(1000);
-    expect(view.data.nodes[0].x).toBe(100);
+    expect(view.graph.nodes[0].x).toBe(100);
     expect(JSON.parse(view.lastSavedData).nodes[0].x).toBe(100);
-    view.data.nodes[0].x = 0;
+    view.graph.nodes[0].x = 0;
     view.dirty = true;
     const saving = view.save();
     expect(view.saving).toBe(true);
@@ -87,7 +88,7 @@ describe("Canvas formats and pending writes", () => {
     await vi.advanceTimersByTimeAsync(3000);
     expect(node.get("x")).toBe(0);
     expect(JSON.parse(host.files.get(path)!).nodes[0].x).toBe(0);
-    expect(view.data.nodes[0].x).toBe(0);
+    expect(view.graph.nodes[0].x).toBe(0);
   });
 
   it("restores the native save baseline after a failed adapter write without reverting input", async () => {
@@ -105,7 +106,7 @@ describe("Canvas formats and pending writes", () => {
       .get("seed")!
       .set("x", 100);
     await vi.advanceTimersByTimeAsync(1000);
-    expect(view.data.nodes[0].x).toBe(100);
+    expect(view.graph.nodes[0].x).toBe(100);
     expect(view.lastSavedData).toBe(baseline);
     expect(view.dirty).toBe(true);
     expect(requestSave).toHaveBeenCalledOnce();

@@ -453,6 +453,13 @@ export class CanvasSync {
       } finally {
         setTimeout(() => {
           this.fileOpsManager.unmutePathEvents(diskPath);
+          // A native save may have landed while our watcher events were muted.
+          // Reconcile disk once the mute ends so its event cannot be lost.
+          if (this.subscriptions.get(path) === subscription) {
+            void this.handleLocalModify(path).catch(() => {
+              new Notice(`Live Share: failed to read canvas ${diskPath}`);
+            });
+          }
         }, VAULT_EVENT_SETTLE_MS);
       }
     });

@@ -26,11 +26,11 @@ describe("Canvas native serialization", () => {
     await c.canvas.subscribe(path, "host");
     const view = mountView(c, leaves);
     view.getViewData = function () {
-      const nodes = this.data.nodes.map((node: any) =>
+      const nodes = this.graph.nodes.map((node: any) =>
         Object.fromEntries(Object.entries(node).sort(([a], [b]) => (a < b ? 1 : a > b ? -1 : 0))),
       );
       return JSON.stringify(
-        { edges: this.data.edges, nodes, metadata: this.data.metadata },
+        { edges: this.graph.edges, nodes, metadata: this.graph.metadata },
         null,
         2,
       );
@@ -61,9 +61,9 @@ describe("Canvas native serialization", () => {
     // Installed native importData mutates the incoming edge object to add these
     // sides before assigning canvas.data; canvas.d.ts marks both as optional.
     view.setViewData = function (content: string) {
-      this.data = JSON.parse(content);
-      this.data.metadata.frontmatter.nativeDefault = true;
-      for (const edge of this.data.edges) {
+      this.graph = JSON.parse(content);
+      this.graph.metadata.frontmatter.nativeDefault = true;
+      for (const edge of this.graph.edges) {
         edge.fromSide ??= "right";
         edge.toSide ??= "left";
       }

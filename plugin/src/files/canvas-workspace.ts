@@ -17,6 +17,7 @@ export interface CanvasWritePreparation {
 interface CanvasView {
   file?: { path: string };
   dirty?: boolean;
+  data?: string;
   saving?: boolean;
   requestSave?: () => void;
   lastSavedData?: string | null;
@@ -107,6 +108,7 @@ export class CanvasWorkspace implements CanvasWritePreparation {
     const previous = views.map((view) => ({
       view,
       baseline: view.lastSavedData,
+      loaded: view.data,
       content: view.getViewData(),
     }));
     for (const view of views) view.setViewData(content, false);
@@ -122,15 +124,17 @@ export class CanvasWorkspace implements CanvasWritePreparation {
       // Native requestSave callbacks can still run after dirty is cleared. Use
       // their exact serialization so an unchanged save is a no-op. Writing those
       // same bytes also makes the filesystem watcher skip sibling reloads.
+      view.data = nativeContent;
       view.lastSavedData = nativeContent;
       view.dirty = false;
     }
     return {
       content: nativeContent,
       rollback: () => {
-        for (const { view, baseline } of previous) {
+        for (const { view, baseline, loaded } of previous) {
           if (view.file?.path !== path || view.lastSavedData !== nativeContent || view.saving)
             continue;
+          view.data = loaded;
           view.lastSavedData = baseline;
           view.dirty = true;
           view.requestSave?.();

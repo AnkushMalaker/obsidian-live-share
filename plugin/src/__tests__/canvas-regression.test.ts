@@ -102,7 +102,7 @@ describe("Canvas session regressions", () => {
     link(host, guest);
     await guest.canvas.subscribe(path, "guest");
     const view = mountView(guest, leaves);
-    view.data.nodes[1].x = 500;
+    view.graph.nodes[1].x = 500;
     view.dirty = true; // Visible on screen, not on disk or Yjs yet.
     host.files.set(
       path,
@@ -113,7 +113,7 @@ describe("Canvas session regressions", () => {
     for (const c of [host, guest]) {
       expect(JSON.parse(c.files.get(path)!).nodes.map((n: any) => n.x)).toEqual([100, 500]);
     }
-    expect(view.data.nodes.map((n: any) => n.x)).toEqual([100, 500]);
+    expect(view.graph.nodes.map((n: any) => n.x)).toEqual([100, 500]);
   });
 
   it("uses each dirty view's baseline when flushing two views of the same canvas", async () => {
@@ -122,8 +122,8 @@ describe("Canvas session regressions", () => {
     await host.canvas.subscribe(path, "host");
     const first = mountView(host, leaves);
     const second = mountView(host, leaves);
-    first.data.nodes[0].x = 100;
-    second.data.nodes[0].y = 200;
+    first.graph.nodes[0].x = 100;
+    second.graph.nodes[0].y = 200;
     first.dirty = second.dirty = true;
     host.sync
       .getDoc(`__canvas__:${path}`)
@@ -143,7 +143,7 @@ describe("Canvas session regressions", () => {
     const host = make(undefined, new CanvasWorkspace({ getLeavesOfType: () => leaves } as any));
     await host.canvas.subscribe(path, "host");
     const view = mountView(host, leaves);
-    view.data.nodes[0].x = 100;
+    view.graph.nodes[0].x = 100;
     view.dirty = view.saving = true;
     host.sync
       .getDoc(`__canvas__:${path}`)
@@ -152,7 +152,7 @@ describe("Canvas session regressions", () => {
       .set("y", 200);
     await vi.advanceTimersByTimeAsync(1100);
     expect(host.vault.adapter.write).not.toHaveBeenCalled();
-    expect(view.data.nodes[0].x).toBe(100);
+    expect(view.graph.nodes[0].x).toBe(100);
     view.saving = false;
     await vi.advanceTimersByTimeAsync(2200);
     expect(JSON.parse(host.files.get(path)!).nodes[0]).toMatchObject({ x: 100, y: 200 });
@@ -169,7 +169,7 @@ describe("Canvas session regressions", () => {
       .get("seed")!
       .set("y", 200);
     host.vault.read.mockImplementationOnce(async () => {
-      view.data.nodes[0].x = 100;
+      view.graph.nodes[0].x = 100;
       view.dirty = true;
       return host.files.get(path)!;
     });
@@ -218,7 +218,7 @@ describe("Canvas session regressions", () => {
       requestSave: {
         run: vi.fn(() => {
           child.dirty = false;
-          view.data.nodes[0].text = "Hi, my name is John.";
+          view.graph.nodes[0].text = "Hi, my name is John.";
           view.dirty = true;
         }),
       },
