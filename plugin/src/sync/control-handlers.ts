@@ -104,6 +104,9 @@ export function registerControlHandlers(plugin: LiveSharePlugin): void {
           plugin.manifestManager.addFolder(op.path);
         }
       })
+      .then((applied) => {
+        plugin.logger.log("file-op-result", JSON.stringify({ type: op.type, paths, applied }));
+      })
       .catch((err) => {
         plugin.logger.error("file-op", "failed to apply remote file-op", err);
       });

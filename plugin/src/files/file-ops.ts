@@ -1,4 +1,4 @@
-import { type FileManager, Notice, type TAbstractFile, TFile, TFolder, type Vault } from "obsidian";
+import { type FileManager, Notice, type TAbstractFile, TFile, type Vault } from "obsidian";
 import { OfflineQueue } from "../sync/offline-queue";
 import type { FileOp } from "../types";
 import {
@@ -41,7 +41,7 @@ export class FileOpsManager {
   private mutedPaths = new Map<string, number>();
   private pendingChunks = new Map<string, ChunkAssembly>();
   private outgoingTransfers = new Map<string, OutgoingTransfer>();
-  private opQueues = new Map<string, Promise<void>>();
+  private opQueues = new Map<string, Promise<boolean>>();
   private sendQueues = new Map<string, Promise<void>>();
   private staleTimer: ReturnType<typeof setInterval> | null = null;
   private offlineQueue = new OfflineQueue();
@@ -133,19 +133,20 @@ export class FileOpsManager {
     const paths = this.getOpPaths(op);
 
     // Chain onto existing queue for all affected paths atomically
-    const currentQueues = paths.map((path) => this.opQueues.get(path) ?? Promise.resolve());
+    const currentQueues = paths.map((path) => this.opQueues.get(path) ?? Promise.resolve(true));
     const gate = Promise.all(currentQueues);
 
     const promise = gate.then(async () => {
-      await this.applyRemoteOpInner(op);
-      if (afterApply) await afterApply();
+      const applied = await this.applyRemoteOpInner(op);
+      if (applied && afterApply) await afterApply();
+      return applied;
     });
 
     // Set the new promise for all paths BEFORE awaiting
     for (const path of paths) this.opQueues.set(path, promise);
 
     try {
-      await promise;
+      return await promise;
     } finally {
       for (const path of paths) {
         if (this.opQueues.get(path) === promise) this.opQueues.delete(path);
@@ -173,9 +174,9 @@ export class FileOpsManager {
     if ("oldPath" in op) op.oldPath = toLocalPath(normalizePath(op.oldPath));
     if ("newPath" in op) op.newPath = toLocalPath(normalizePath(op.newPath));
 
-    if ("path" in op && !this.isPathSafe(op.path)) return;
-    if ("oldPath" in op && !this.isPathSafe(op.oldPath)) return;
-    if ("newPath" in op && !this.isPathSafe(op.newPath)) return;
+    if ("path" in op && !this.isPathSafe(op.path)) return false;
+    if ("oldPath" in op && !this.isPathSafe(op.oldPath)) return false;
+    if ("newPath" in op && !this.isPathSafe(op.newPath)) return false;
 
     const paths = this.getOpPaths(op);
     for (const path of paths) this.mutePathEvents(path);
@@ -242,14 +243,17 @@ export class FileOpsManager {
             try {
               await this.vault.rename(file, op.newPath);
             } catch (renameErr) {
-              if (!this.vault.getAbstractFileByPath(op.newPath)) throw renameErr;
+              if (
+                this.vault.getAbstractFileByPath(op.oldPath) ||
+                !this.vault.getAbstractFileByPath(op.newPath)
+              )
+                throw renameErr;
             }
           } else if (file && alreadyExists) {
-            if (file instanceof TFolder || alreadyExists instanceof TFolder) {
-              new Notice(`Live Share: folder rename conflict at ${op.newPath}; both folders kept`);
-            } else {
-              await this.fileManager.trashFile(file);
-            }
+            new Notice(`Live Share: rename conflict at ${op.newPath}; both items kept`);
+            return false;
+          } else {
+            return false;
           }
           break;
         }
@@ -366,11 +370,13 @@ export class FileOpsManager {
     } catch {
       const opPath = "path" in op ? op.path : "unknown";
       new Notice(`Live Share: failed to apply ${op.type} for ${opPath}`);
+      return false;
     } finally {
       setTimeout(() => {
         for (const path of paths) this.unmutePathEvents(path);
       }, VAULT_EVENT_SETTLE_MS);
     }
+    return true;
   }
 
   async onFileCreate(file: TAbstractFile) {

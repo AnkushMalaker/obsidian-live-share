@@ -4,6 +4,7 @@ import * as Y from "yjs";
 import { FileOpsManager } from "../files/file-ops";
 import { ManifestManager } from "../files/manifest";
 import LiveSharePlugin from "../main";
+import { registerControlHandlers } from "../sync/control-handlers";
 import { DEFAULT_SETTINGS } from "../types";
 
 vi.mock("obsidian", async (importOriginal) => ({
@@ -142,6 +143,70 @@ describe("folder inventory markers", () => {
       expect(f.trashFile).not.toHaveBeenCalled();
       expect(f.files.has("Job")).toBe(true);
       expect(f.files.has("Existing")).toBe(true);
+    } finally {
+      manager.destroy();
+    }
+  });
+  it.each(["folder", "file"])(
+    "keeps the source and manifest on a full control-channel rename collision with a %s",
+    async (kind) => {
+      const f = fixture();
+      const destination =
+        kind === "folder"
+          ? Object.assign(new TFolder(), { path: "Existing", children: [] })
+          : Object.assign(new TFile(), { path: "Existing" });
+      f.files.set("Existing", destination);
+      f.entries.set("Existing", {
+        directory: kind === "folder",
+        hash: "destination",
+        size: 0,
+        mtime: 0,
+      });
+      const manager = new FileOpsManager(f.vault as any, { trashFile: f.trashFile } as any);
+      const handlers = new Map<string, (message: any) => void>();
+      Object.assign(f.plugin, {
+        settings: { ...DEFAULT_SETTINGS, role: "host" },
+        fileOpsManager: manager,
+        syncManager: { releaseDoc: vi.fn() },
+        controlChannel: {
+          send: vi.fn(),
+          on: (type: string, handler: any) => handlers.set(type, handler),
+        },
+      });
+      registerControlHandlers(f.plugin);
+      try {
+        handlers.get("file-op")?.({
+          op: { type: "rename", oldPath: f.file.path, newPath: "Existing" },
+        });
+        await (manager as any).opQueues.get(f.file.path);
+        await f.plugin.manifestHandlerQueue;
+        expect(f.trashFile).not.toHaveBeenCalled();
+        expect(f.entries.get(f.file.path)?.hash).toBe("before");
+        expect(f.entries.get("Existing")?.hash).toBe("destination");
+        expect(f.files.has(f.file.path)).toBe(true);
+      } finally {
+        manager.destroy();
+      }
+    },
+  );
+  it("does not commit a rename if a destination appears during the filesystem operation", async () => {
+    const f = fixture();
+    f.vault.rename.mockImplementationOnce(async () => {
+      f.files.set("Existing", Object.assign(new TFolder(), { path: "Existing", children: [] }));
+      throw new Error("destination appeared concurrently");
+    });
+    const manager = new FileOpsManager(f.vault as any, { trashFile: f.trashFile } as any);
+    const commit = vi.fn();
+    try {
+      expect(
+        await manager.applyRemoteOp(
+          { type: "rename", oldPath: f.file.path, newPath: "Existing" },
+          commit,
+        ),
+      ).toBe(false);
+      expect(commit).not.toHaveBeenCalled();
+      expect(f.files.has(f.file.path)).toBe(true);
+      expect(f.trashFile).not.toHaveBeenCalled();
     } finally {
       manager.destroy();
     }
