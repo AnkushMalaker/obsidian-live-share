@@ -183,6 +183,10 @@ export class BackgroundSync {
   async onFileAdded(rawPath: string): Promise<void> {
     const path = toCanonicalPath(normalizePath(rawPath));
     if (!isTextFile(path)) return;
+    if (isCanvasFile(path)) {
+      await this.canvasSync?.subscribe(path, this.role === "host" ? "host" : "guest", "remote");
+      return;
+    }
     await this.subscribe(path);
   }
 

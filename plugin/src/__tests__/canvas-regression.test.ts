@@ -1,106 +1,8 @@
-import { TFile } from "obsidian";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import { BackgroundSync } from "../files/background-sync";
-import { CanvasSync } from "../files/canvas-sync";
-import { CanvasWorkspace, type CanvasWritePreparation } from "../files/canvas-workspace";
+import { CanvasWorkspace } from "../files/canvas-workspace";
 import { ManifestManager } from "../files/manifest";
-
-const path = "shared/board.canvas";
-const seed = {
-  nodes: [{ id: "seed", type: "text", text: "Hello", x: 0, y: 0, width: 200, height: 100 }],
-  edges: [],
-  metadata: { version: "1.0", frontmatter: { keep: true } },
-};
-
-function client(
-  initial = new Map([[path, JSON.stringify(seed)]]),
-  localViews?: CanvasWritePreparation,
-) {
-  const files = new Map(initial);
-  const docs = new Map<string, { doc: Y.Doc; text: Y.Text }>();
-  const vault = {
-    read: vi.fn(async (file: TFile) => files.get(file.path) ?? ""),
-    getAbstractFileByPath: vi.fn((name: string) => {
-      if (!files.has(name)) return null;
-      const file = new TFile();
-      file.path = name;
-      return file;
-    }),
-    adapter: {
-      write: vi.fn(async (name: string, content: string) => {
-        files.set(name, content);
-      }),
-    },
-  };
-  const sync = {
-    getDoc(name: string) {
-      if (!docs.has(name)) {
-        const doc = new Y.Doc();
-        docs.set(name, { doc, text: doc.getText("content") });
-      }
-      return docs.get(name)!;
-    },
-    waitForSync: vi.fn(async () => {}),
-    releaseDoc: vi.fn(),
-  };
-  const fileOps = { mutePathEvents: vi.fn(), unmutePathEvents: vi.fn() };
-  const entries = new Map([...files].map(([name]) => [name, { hash: "initial", binary: false }]));
-  const manifest = { getEntries: () => entries, updateFile: vi.fn(async () => {}) };
-  const canvas = new CanvasSync(vault as any, sync as any, fileOps as any, localViews);
-  const background = new BackgroundSync(
-    vault as any,
-    sync as any,
-    manifest as any,
-    fileOps as any,
-    canvas,
-  );
-  return { files, docs, vault, sync, fileOps, entries, manifest, canvas, background };
-}
-
-function mountView(c: ReturnType<typeof client>, leaves: any[]) {
-  const view = {
-    file: { path },
-    dirty: false,
-    saving: false,
-    lastSavedData: c.files.get(path)!,
-    data: JSON.parse(c.files.get(path)!),
-    canvas: { nodes: new Map() },
-    getViewData() {
-      return JSON.stringify(this.data);
-    },
-    async save() {
-      this.dirty = false;
-      this.lastSavedData = this.getViewData();
-      c.files.set(path, this.lastSavedData);
-      // Obsidian emits this event while flushPendingChanges is awaiting save.
-      await c.canvas.handleLocalModify(path);
-    },
-  };
-  leaves.push({ view });
-  c.vault.adapter.write.mockImplementation(async (name, content) => {
-    c.files.set(name, content);
-    for (const leaf of leaves) {
-      leaf.view.data = JSON.parse(content);
-      leaf.view.lastSavedData = content;
-      leaf.view.dirty = false;
-    }
-  });
-  return view;
-}
-
-function link(a: ReturnType<typeof client>, b: ReturnType<typeof client>) {
-  const aDoc = a.sync.getDoc(`__canvas__:${path}`).doc;
-  const bDoc = b.sync.getDoc(`__canvas__:${path}`).doc;
-  aDoc.on("update", (update, origin) => {
-    if (origin !== "remote") Y.applyUpdate(bDoc, update, "remote");
-  });
-  bDoc.on("update", (update, origin) => {
-    if (origin !== "remote") Y.applyUpdate(aDoc, update, "remote");
-  });
-  Y.applyUpdate(bDoc, Y.encodeStateAsUpdate(aDoc), "remote");
-  Y.applyUpdate(aDoc, Y.encodeStateAsUpdate(bDoc), "remote");
-}
+import { path, client, link, mountView, seed } from "./helpers/canvas-client";
 
 describe("Canvas session regressions", () => {
   const clients: ReturnType<typeof client>[] = [];
@@ -131,7 +33,7 @@ describe("Canvas session regressions", () => {
     const host = make(new Map());
     await host.background.startAll("host");
     host.files.set(path, JSON.stringify(seed));
-    await host.background.onFileAdded(path);
+    await host.background.onLocalFileAdded(path);
     const doc = host.sync.getDoc(`__canvas__:${path}`).doc;
     expect(doc.getMap("nodes").has("seed")).toBe(true);
     expect(host.docs.has(path)).toBe(false);
@@ -486,7 +388,7 @@ describe("Canvas session regressions", () => {
     const doc = host.sync.getDoc(`__canvas__:${path}`).doc;
     doc.getMap<Y.Map<unknown>>("nodes").get("seed")!.set("x", 200);
     await vi.advanceTimersByTimeAsync(1100);
-    expect(host.canvas.isRecentDiskWrite(path)).toBe(true);
+    expect(host.fileOps.mutePathEvents).toHaveBeenCalledWith(path);
     const data = JSON.parse(host.files.get(path)!);
     data.nodes[0].y = 500;
     host.files.set(path, JSON.stringify(data));

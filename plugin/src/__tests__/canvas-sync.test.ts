@@ -154,10 +154,6 @@ describe("CanvasSync", () => {
     expect(node.get("y")).toBe(200);
   });
 
-  it("isRecentDiskWrite returns false initially", () => {
-    expect(canvasSync.isRecentDiskWrite("test.canvas")).toBe(false);
-  });
-
   it("destroy cleans up all subscriptions and timers", async () => {
     vault._files.set("a.canvas", '{"nodes":[],"edges":[]}');
     vault._files.set("b.canvas", '{"nodes":[],"edges":[]}');
@@ -171,7 +167,7 @@ describe("CanvasSync", () => {
     expect(syncManager.releaseDoc).toHaveBeenCalledTimes(2);
   });
 
-  it("concurrent node moves merge correctly via shared Y.Doc", async () => {
+  it("local property changes update the shared Y.Doc", async () => {
     const canvasContent = JSON.stringify({
       nodes: [
         { id: "n1", x: 0, y: 0 },

@@ -25,7 +25,13 @@ interface CanvasData {
 }
 
 function emptyCanvas(): CanvasData {
-  return { nodes: {}, edges: {}, properties: {}, nodeOrder: [], edgeOrder: [] };
+  return {
+    nodes: Object.create(null),
+    edges: Object.create(null),
+    properties: {},
+    nodeOrder: [],
+    edgeOrder: [],
+  };
 }
 
 function parseCanvas(content: string): CanvasData | null {
@@ -36,11 +42,13 @@ function parseCanvas(content: string): CanvasData | null {
     const data: CanvasData = { ...emptyCanvas(), properties };
     for (const node of nodes) {
       if (!node || typeof node.id !== "string") return null;
+      if (Object.prototype.hasOwnProperty.call(data.nodes, node.id)) return null;
       data.nodes[node.id] = node;
       data.nodeOrder.push(node.id);
     }
     for (const edge of edges) {
       if (!edge || typeof edge.id !== "string") return null;
+      if (Object.prototype.hasOwnProperty.call(data.edges, edge.id)) return null;
       data.edges[edge.id] = edge;
       data.edgeOrder.push(edge.id);
     }
@@ -111,7 +119,7 @@ function applyOrder(order: Y.Map<number>, next: string[], previous: string[]): v
   const oldPositions = new Map(previous.map((id, index) => [id, index]));
   const nextIds = new Set(next);
   for (const [index, id] of next.entries()) {
-    if (oldPositions.get(id) !== index) order.set(id, index);
+    if (oldPositions.get(id) !== index || !order.has(id)) order.set(id, index);
   }
   for (const id of previous) {
     if (!nextIds.has(id)) order.delete(id);
@@ -123,20 +131,18 @@ function orderedItems(items: Y.Map<Y.Map<unknown>>, order: Y.Map<number>): unkno
     .sort(
       ([a], [b]) =>
         (order.get(a) ?? Number.POSITIVE_INFINITY) - (order.get(b) ?? Number.POSITIVE_INFINITY) ||
-        a.localeCompare(b),
+        (a < b ? -1 : a > b ? 1 : 0),
     )
     .map(([, item]) => item.toJSON());
 }
 
 export class CanvasSync {
-  private subscribedPaths = new Set<string>();
   private subscriptions = new Map<string, object>();
   private roles = new Map<string, "host" | "guest">();
   private subscribing = new Map<string, Promise<void>>();
   private observers = new Map<string, () => void>();
   private writeTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private writeQueues = new Map<string, Promise<void>>();
-  private recentDiskWrites = new Set<string>();
   private lastLocalData = new Map<string, CanvasData>();
   private localReads = new Map<string, object>();
   private flushingLocalViews = new Set<string>();
@@ -148,7 +154,11 @@ export class CanvasSync {
     private localViews?: CanvasWritePreparation,
   ) {}
 
-  async subscribe(rawPath: string, role: "host" | "guest"): Promise<void> {
+  async subscribe(
+    rawPath: string,
+    role: "host" | "guest",
+    source: "local" | "remote" = "local",
+  ): Promise<void> {
     const path = toCanonicalPath(normalizePath(rawPath));
     const pending = this.subscribing.get(path);
     if (pending) return pending;
@@ -156,8 +166,7 @@ export class CanvasSync {
     const subscription = {};
     this.subscriptions.set(path, subscription);
     this.roles.set(path, role);
-    this.subscribedPaths.add(path);
-    const task = this.subscribePath(path, role, subscription);
+    const task = this.subscribePath(path, role, subscription, source);
     this.subscribing.set(path, task);
     try {
       await task;
@@ -166,11 +175,15 @@ export class CanvasSync {
     }
   }
 
-  private async subscribePath(path: string, role: "host" | "guest", subscription: object) {
+  private async subscribePath(
+    path: string,
+    role: "host" | "guest",
+    subscription: object,
+    source: "local" | "remote",
+  ) {
     const docId = `${CANVAS_DOC_PREFIX}${path}`;
     const handle = this.syncManager.getDoc(docId);
     if (!handle) {
-      this.subscribedPaths.delete(path);
       this.subscriptions.delete(path);
       this.roles.delete(path);
       return;
@@ -187,26 +200,8 @@ export class CanvasSync {
     const edges = handle.doc.getMap<Y.Map<unknown>>("edges");
     const properties = handle.doc.getMap<unknown>("properties");
     const meta = handle.doc.getMap("meta");
-    if (role === "host" && !meta.get("seeded")) {
-      const file = getFileByPath(this.vault, toLocalPath(path));
-      const data = file ? parseCanvas(await this.vault.read(file)) : null;
-      if (this.subscriptions.get(path) !== subscription) return;
-      if (data) {
-        this.lastLocalData.set(path, data);
-        handle.doc.transact(() => {
-          applyItems(nodes, data.nodes, {});
-          applyItems(edges, data.edges, {});
-          applyProperties(properties, data.properties, {});
-          applyOrder(handle.doc.getMap("nodeOrder"), data.nodeOrder, []);
-          applyOrder(handle.doc.getMap("edgeOrder"), data.edgeOrder, []);
-          meta.set("seeded", true);
-        }, this);
-      }
-    } else if (meta.get("seeded") || nodes.size > 0 || edges.size > 0) {
-      await this.writeToDisk(path, subscription);
-      if (this.subscriptions.get(path) !== subscription) return;
-    }
-
+    // Observe before asynchronous hydration so an update during that write is
+    // not stranded in Yjs while disk keeps the older snapshot.
     const observer = (_events: unknown, transaction: Y.Transaction) => {
       if (transaction.origin === this) return;
       this.scheduleDiskWrite(path, subscription);
@@ -225,11 +220,29 @@ export class CanvasSync {
       handle.doc.getMap("edgeOrder").unobserve(observer);
       meta.unobserve(observer);
     });
+
+    if (role === "host" && source === "local") {
+      const file = getFileByPath(this.vault, toLocalPath(path));
+      const data = file ? parseCanvas(await this.vault.read(file)) : null;
+      if (this.subscriptions.get(path) !== subscription) return;
+      if (data) {
+        // A fresh host instance follows the existing host-authoritative policy.
+        // meta.seeded alone cannot tell whether a peer's retained board is stale.
+        const previous = parseCanvas(this.serialize(handle.doc)) ?? emptyCanvas();
+        this.applyLocalData(path, data, previous);
+        this.lastLocalData.set(path, data);
+        handle.doc.transact(() => meta.set("seeded", true), this);
+        return;
+      }
+      if (file) return; // Preserve a malformed local file for recovery.
+    }
+    if (meta.get("seeded") || nodes.size > 0 || edges.size > 0) {
+      await this.writeToDisk(path, subscription);
+    }
   }
 
   unsubscribe(rawPath: string): void {
     const path = toCanonicalPath(normalizePath(rawPath));
-    this.subscribedPaths.delete(path);
     this.subscriptions.delete(path);
     this.roles.delete(path);
     this.subscribing.delete(path);
@@ -266,7 +279,7 @@ export class CanvasSync {
     this.scheduleDiskWrite(path, subscription);
   }
 
-  private applyLocalData(path: string, data: CanvasData, previous: CanvasData): void {
+  private applyLocalData(path: string, data: CanvasData, previous: CanvasData, saved = true): void {
     if (equal(data, previous)) return;
     const handle = this.syncManager.getDoc(`${CANVAS_DOC_PREFIX}${path}`);
     if (!handle) return;
@@ -281,21 +294,16 @@ export class CanvasSync {
       const meta = handle.doc.getMap("meta");
       if (this.roles.get(path) === "host" && !meta.get("seeded")) meta.set("seeded", true);
     }, this);
-    this.lastLocalData.set(path, data);
+    if (saved) this.lastLocalData.set(path, data);
     this.localReads.delete(path);
   }
 
-  isRecentDiskWrite(rawPath: string): boolean {
-    return this.recentDiskWrites.has(toCanonicalPath(normalizePath(rawPath)));
-  }
-
   isSubscribed(rawPath: string): boolean {
-    return this.subscribedPaths.has(toCanonicalPath(normalizePath(rawPath)));
+    return this.subscriptions.has(toCanonicalPath(normalizePath(rawPath)));
   }
 
   destroy(): void {
-    for (const path of [...this.subscribedPaths]) this.unsubscribe(path);
-    this.recentDiskWrites.clear();
+    for (const path of [...this.subscriptions.keys()]) this.unsubscribe(path);
   }
 
   private scheduleDiskWrite(path: string, subscription: object): void {
@@ -325,11 +333,13 @@ export class CanvasSync {
         let ready: boolean;
         this.flushingLocalViews.add(path);
         try {
-          ready = await this.localViews.flushPendingChanges(diskPath, (content, baseline) => {
-            if (this.subscriptions.get(path) !== subscription) return;
+          ready = this.localViews.capturePendingChanges(diskPath, (content, baseline) => {
+            if (this.subscriptions.get(path) !== subscription) return false;
             const next = parseCanvas(content);
             const previous = parseCanvas(baseline);
-            if (next && previous) this.applyLocalData(path, next, previous);
+            if (!next || !previous) return false;
+            this.applyLocalData(path, next, previous, false);
+            return true;
           });
         } finally {
           this.flushingLocalViews.delete(path);
@@ -343,25 +353,27 @@ export class CanvasSync {
       const parentDir = diskPath.substring(0, diskPath.lastIndexOf("/"));
       if (parentDir) await ensureFolder(this.vault, parentDir);
       const file = getFileByPath(this.vault, diskPath);
-      const existing = file ? parseCanvas(await this.vault.read(file)) : null;
+      let existing: CanvasData | null = null;
+      let previous = this.lastLocalData.get(path);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        previous = this.lastLocalData.get(path);
+        existing = file ? parseCanvas(await this.vault.read(file)) : null;
+        if (this.subscriptions.get(path) !== subscription) return;
+        if (previous === this.lastLocalData.get(path)) break;
+        if (attempt === 1) {
+          this.scheduleDiskWrite(path, subscription);
+          return;
+        }
+      }
       if (this.subscriptions.get(path) !== subscription) return;
       // Also ingest a save whose vault event is still being processed. Build
       // the outgoing snapshot only after these asynchronous reads/flushes.
-      const previous = this.lastLocalData.get(path);
       if (existing && previous) this.applyLocalData(path, existing, previous);
       if (this.localViews?.hasPendingChanges(diskPath)) {
         this.scheduleDiskWrite(path, subscription);
         return;
       }
-      const content = JSON.stringify(
-        {
-          ...handle.doc.getMap("properties").toJSON(),
-          nodes: orderedItems(nodes, handle.doc.getMap("nodeOrder")),
-          edges: orderedItems(edges, handle.doc.getMap("edgeOrder")),
-        },
-        null,
-        "\t",
-      );
+      const content = this.serialize(handle.doc);
       const data = parseCanvas(content);
       if (!data) return;
       // Obsidian serializes Canvas differently from our shared document. An
@@ -369,22 +381,20 @@ export class CanvasSync {
       // typed since its last save. Only write actual graph changes.
       if (equal(existing, data)) {
         this.lastLocalData.set(path, data);
-        this.localReads.delete(path);
         return;
       }
       if (this.subscriptions.get(path) !== subscription) return;
-      this.recentDiskWrites.add(path);
       this.fileOpsManager.mutePathEvents(diskPath);
       try {
         if (this.subscriptions.get(path) !== subscription) return;
+        this.localViews?.applyMergedData(diskPath, content);
         await this.vault.adapter.write(diskPath, content);
         if (this.subscriptions.get(path) === subscription) {
           this.lastLocalData.set(path, data);
-          this.localReads.delete(path);
+          if (this.serialize(handle.doc) !== content) this.scheduleDiskWrite(path, subscription);
         }
       } finally {
         setTimeout(() => {
-          this.recentDiskWrites.delete(path);
           this.fileOpsManager.unmutePathEvents(diskPath);
         }, VAULT_EVENT_SETTLE_MS);
       }
@@ -395,5 +405,17 @@ export class CanvasSync {
     this.writeQueues.set(path, settled);
     await settled;
     if (this.writeQueues.get(path) === settled) this.writeQueues.delete(path);
+  }
+
+  private serialize(doc: Y.Doc): string {
+    return JSON.stringify(
+      {
+        ...doc.getMap("properties").toJSON(),
+        nodes: orderedItems(doc.getMap("nodes"), doc.getMap("nodeOrder")),
+        edges: orderedItems(doc.getMap("edges"), doc.getMap("edgeOrder")),
+      },
+      null,
+      "\t",
+    );
   }
 }
