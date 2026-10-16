@@ -1,4 +1,5 @@
 import { minimatch } from "minimatch";
+import { normalizePath, toCanonicalPath } from "../utils";
 
 export class ExclusionManager {
   private patterns: string[] = [];
@@ -14,11 +15,12 @@ export class ExclusionManager {
   }
 
   setLocalLogPath(path: string): void {
-    this.localLogPath = path.replaceAll("\\", "/").replace(/^\.\//, "");
+    this.localLogPath = toCanonicalPath(normalizePath(path)).replace(/^\.\//, "");
   }
 
   isExcluded(path: string): boolean {
-    if (path.replaceAll("\\", "/").replace(/^\.\//, "") === this.localLogPath) return true;
+    if (toCanonicalPath(normalizePath(path)).replace(/^\.\//, "") === this.localLogPath)
+      return true;
     return this.patterns.some((pattern) => minimatch(path, pattern));
   }
 }

@@ -1,3 +1,4 @@
+import { Platform } from "obsidian";
 import { beforeEach, describe, expect, it } from "vitest";
 import { ExclusionManager } from "../files/exclusion";
 
@@ -46,6 +47,17 @@ describe("ExclusionManager", () => {
       manager.setPatterns([]);
       expect(manager.isExcluded("live-share-debug.md")).toBe(true);
       expect(manager.isExcluded("notes/live-share-debug.md")).toBe(false);
+    });
+
+    it("excludes the Windows log path using the manifest's canonical spelling", () => {
+      const wasWindows = Platform.isWin;
+      try {
+        Platform.isWin = true;
+        manager.setLocalLogPath("logs/debug：local.md");
+        expect(manager.isExcluded("logs/debug:local.md")).toBe(true);
+      } finally {
+        Platform.isWin = wasWindows;
+      }
     });
 
     it("compares log paths literally and normalizes relative separators", () => {
