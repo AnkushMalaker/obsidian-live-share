@@ -36,9 +36,11 @@ function emptyCanvas(): CanvasData {
 
 function parseCanvas(content: string): CanvasData | null {
   try {
+    if (!content.trim()) return emptyCanvas();
     const parsed = JSON.parse(content);
-    if (!parsed || !Array.isArray(parsed.nodes) || !Array.isArray(parsed.edges)) return null;
-    const { nodes, edges, ...properties } = parsed;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const { nodes = [], edges = [], ...properties } = parsed;
+    if (!Array.isArray(nodes) || !Array.isArray(edges)) return null;
     const data: CanvasData = { ...emptyCanvas(), properties };
     for (const node of nodes) {
       if (!node || typeof node.id !== "string") return null;
@@ -385,14 +387,26 @@ export class CanvasSync {
       }
       if (this.subscriptions.get(path) !== subscription) return;
       this.fileOpsManager.mutePathEvents(diskPath);
+      let restoreViews: (() => void) | undefined;
+      const diskBaseline = this.lastLocalData.get(path);
       try {
         if (this.subscriptions.get(path) !== subscription) return;
-        this.localViews?.applyMergedData(diskPath, content);
+        // Once this graph becomes visible it is the user's edit baseline, even
+        // though persistence is still pending. A deliberate revert must count.
+        restoreViews = this.localViews?.applyMergedData(diskPath, content);
+        if (restoreViews) this.lastLocalData.set(path, data);
         await this.vault.adapter.write(diskPath, content);
         if (this.subscriptions.get(path) === subscription) {
           this.lastLocalData.set(path, data);
           if (this.serialize(handle.doc) !== content) this.scheduleDiskWrite(path, subscription);
         }
+      } catch (error) {
+        restoreViews?.();
+        if (this.lastLocalData.get(path) === data) {
+          if (diskBaseline) this.lastLocalData.set(path, diskBaseline);
+          else this.lastLocalData.delete(path);
+        }
+        throw error;
       } finally {
         setTimeout(() => {
           this.fileOpsManager.unmutePathEvents(diskPath);

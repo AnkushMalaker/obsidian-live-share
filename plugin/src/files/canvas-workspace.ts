@@ -6,7 +6,7 @@ export interface CanvasWritePreparation {
     applySnapshot: (content: string, previous: string) => boolean,
   ): boolean;
   hasPendingChanges(path: string): boolean;
-  applyMergedData(path: string, content: string): void;
+  applyMergedData(path: string, content: string): (() => void) | undefined;
 }
 
 // Canvas save state is not exported in Obsidian's public types.
@@ -14,6 +14,7 @@ interface CanvasView {
   file?: { path: string };
   dirty?: boolean;
   saving?: boolean;
+  requestSave?: () => void;
   lastSavedData?: string | null;
   getViewData(): string;
   setViewData(content: string, clear: boolean): void;
@@ -92,9 +93,27 @@ export class CanvasWorkspace implements CanvasWritePreparation {
     return true;
   }
 
-  applyMergedData(path: string, content: string): void {
-    // Pending native autosaves must see the merged graph, not a stale leaf's
-    // snapshot, while the adapter write is in flight.
-    for (const view of this.views(path)) view.setViewData(content, false);
+  applyMergedData(path: string, content: string): (() => void) | undefined {
+    const views = this.views(path);
+    if (!views.length) return undefined;
+    const previous = views.map((view) => ({ view, baseline: view.lastSavedData }));
+    for (const view of views) {
+      view.setViewData(content, false);
+      // Match TextFileView.save's optimistic baseline. Otherwise reverting a
+      // visible remote edit can equal the old lastSavedData and save() silently
+      // drops it. The matching baseline also prevents our watcher event from
+      // reloading a leaf that has accumulated newer input during this write.
+      view.lastSavedData = content;
+      view.dirty = false;
+    }
+    return () => {
+      for (const { view, baseline } of previous) {
+        // A newer native save owns its own baseline and recovery.
+        if (view.file?.path !== path || view.lastSavedData !== content || view.saving) continue;
+        view.lastSavedData = baseline;
+        view.dirty = true;
+        view.requestSave?.();
+      }
+    };
   }
 }
