@@ -112,8 +112,8 @@ export class CanvasWorkspace implements CanvasWritePreparation {
     for (const view of views) view.setViewData(content, false);
     const nativeContent = views[0].getViewData();
     if (
-      !acceptSerialization(nativeContent) ||
-      views.some((view) => view.getViewData() !== nativeContent)
+      views.some((view) => view.getViewData() !== nativeContent) ||
+      !acceptSerialization(nativeContent)
     ) {
       for (const { view, content } of previous) view.setViewData(content, false);
       throw new Error("Canvas views cannot serialize the shared graph without changes");

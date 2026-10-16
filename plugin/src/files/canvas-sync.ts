@@ -83,6 +83,33 @@ function equal(a: unknown, b: unknown): boolean {
   );
 }
 
+// Canvas and extensions may fill optional defaults while rendering (for example
+// edge sides). Accept additions, but never silently persist a removed/changed
+// shared value merely because an editor cannot represent it.
+function preservesValues(previous: unknown, next: unknown): boolean {
+  if (equal(previous, next)) return true;
+  if (Array.isArray(previous)) {
+    return (
+      Array.isArray(next) &&
+      previous.length === next.length &&
+      previous.every((value, index) => preservesValues(value, next[index]))
+    );
+  }
+  if (
+    !previous ||
+    !next ||
+    typeof previous !== "object" ||
+    typeof next !== "object" ||
+    Array.isArray(next)
+  )
+    return false;
+  const values = next as Record<string, unknown>;
+  return Object.entries(previous).every(
+    ([key, value]) =>
+      Object.prototype.hasOwnProperty.call(values, key) && preservesValues(value, values[key]),
+  );
+}
+
 function applyProperties(
   map: Y.Map<unknown>,
   next: Record<string, unknown>,
@@ -378,8 +405,9 @@ export class CanvasSync {
         return;
       }
       let content = this.serialize(handle.doc);
-      const data = parseCanvas(content);
-      if (!data) return;
+      const serializedData = parseCanvas(content);
+      if (!serializedData) return;
+      let data: CanvasData = serializedData;
       // Obsidian serializes Canvas differently from our shared document. An
       // equivalent rewrite still reloads an open card and can discard text
       // typed since its last save. Only write actual graph changes.
@@ -395,9 +423,15 @@ export class CanvasSync {
         if (this.subscriptions.get(path) !== subscription) return;
         // Once this graph becomes visible it is the user's edit baseline, even
         // though persistence is still pending. A deliberate revert must count.
-        const prepared = this.localViews?.applyMergedData(diskPath, content, (nativeContent) =>
-          equal(parseCanvas(nativeContent), data),
-        );
+        const prepared = this.localViews?.applyMergedData(diskPath, content, (nativeContent) => {
+          const normalized = parseCanvas(nativeContent);
+          if (!normalized || !preservesValues(data, normalized)) return false;
+          if (!equal(normalized, data)) {
+            this.applyLocalData(path, normalized, data, false);
+            data = normalized;
+          }
+          return true;
+        });
         if (prepared) {
           content = prepared.content;
           restoreViews = prepared.rollback;

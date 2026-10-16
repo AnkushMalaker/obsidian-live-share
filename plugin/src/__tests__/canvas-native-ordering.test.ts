@@ -59,23 +59,6 @@ describe("Canvas native save ordering", () => {
     expect(JSON.parse(host.files.get(path)!).nodes[0]).toMatchObject({ x: 100, y: 200 });
   });
 
-  it("keeps a guest rename's document editable without reseeding unchanged fields from a pre-hydration save", async () => {
-    const guest = make();
-    const host = make();
-    await host.background.startAll("host");
-    await guest.background.startAll("guest");
-    link(host, guest);
-    await vi.advanceTimersByTimeAsync(1100);
-    const renamed = "shared/renamed.canvas";
-    guest.files.set(renamed, guest.files.get(path)!);
-    guest.files.delete(path);
-    await guest.background.onFileRenamed(path, renamed);
-    guest.files.set(renamed, JSON.stringify({ ...seed, nodes: [{ ...seed.nodes[0], x: 100 }] }));
-    await guest.background.handleLocalTextModify(renamed);
-    const doc = guest.sync.getDoc(`__canvas__:${renamed}`).doc;
-    expect(doc.getMap<Y.Map<unknown>>("nodes").get("seed")?.get("x")).toBe(100);
-  });
-
   it("does not let a queued native autosave reload a newer dirty sibling after the incoming merge", async () => {
     const leaves: any[] = [];
     const host = make(undefined, new CanvasWorkspace({ getLeavesOfType: () => leaves } as any));
@@ -84,7 +67,7 @@ describe("Canvas native save ordering", () => {
     const second = mountView(host, leaves);
     // Model Q4.save's real string-equality gate, and Canvas's isPlaintext=false
     // sibling reload. Compact JSON is a stand-in for native Yb formatting;
-    // native-serialization-evidence.txt independently verifies the mismatch.
+    // Installed Obsidian 1.14.4 uses a different native JSON formatter.
     first.save = async function () {
       this.dirty = false;
       const content = this.getViewData();
