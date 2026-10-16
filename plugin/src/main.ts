@@ -254,6 +254,7 @@ export default class LiveSharePlugin extends Plugin {
     this.exclusionManager = new ExclusionManager();
     this.exclusionManager.setConfigDir(this.app.vault.configDir);
     this.exclusionManager.setPatterns(this.settings.excludePatterns);
+    this.exclusionManager.setLocalLogPath(this.settings.debugLogPath);
     this.manifestManager.setExclusionManager(this.exclusionManager);
     this.backgroundSync = new BackgroundSync(
       this.app.vault,
@@ -409,6 +410,7 @@ export default class LiveSharePlugin extends Plugin {
     this.manifestManager.updateSettings(this.settings);
     this.logger.updateSettings(this.settings.debugLogging, this.settings.debugLogPath);
     this.exclusionManager.setPatterns(this.settings.excludePatterns);
+    this.exclusionManager.setLocalLogPath(this.settings.debugLogPath);
   }
 
   notify(msg: string): void {

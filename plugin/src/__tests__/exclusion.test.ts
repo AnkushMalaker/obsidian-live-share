@@ -40,6 +40,24 @@ describe("ExclusionManager", () => {
     });
   });
 
+  describe("local debug log", () => {
+    it("keeps the configured log out of shared file events regardless of debug toggle", () => {
+      manager.setLocalLogPath("live-share-debug.md");
+      manager.setPatterns([]);
+      expect(manager.isExcluded("live-share-debug.md")).toBe(true);
+      expect(manager.isExcluded("notes/live-share-debug.md")).toBe(false);
+    });
+
+    it("compares log paths literally and normalizes relative separators", () => {
+      manager.setLocalLogPath("./logs\\debug[1].md");
+      expect(manager.isExcluded("logs/debug[1].md")).toBe(true);
+      expect(manager.isExcluded("logs/debug1.md")).toBe(false);
+      manager.setLocalLogPath("other.log");
+      expect(manager.isExcluded("other.log")).toBe(true);
+      expect(manager.isExcluded("logs/debug[1].md")).toBe(false);
+    });
+  });
+
   describe("setPatterns", () => {
     it("merges custom patterns with defaults", () => {
       manager.setPatterns(["*.tmp", "drafts/**"]);

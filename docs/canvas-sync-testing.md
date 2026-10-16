@@ -84,7 +84,9 @@ exercises the real manifest manager and plugin callback, including a two-documen
 peer update, inventory refresh, and folder rename collisions.
 
 Local diagnostics can be enabled in plugin settings. Use
-`.obsidian/plugins/live-share/debug.log` to keep the log out of shared notes.
+`.obsidian/plugins/live-share/debug.log` to keep diagnostics outside ordinary notes.
+The configured log path is always excluded from sharing, including when logging
+is disabled, so a log append cannot trigger another sync diagnostic.
 The log identifies the client and records inventory changes, outgoing/incoming
 folder operations, and observed local deletes. It records paths and operation
 metadata rather than note bodies or connection secrets. A vault delete event
