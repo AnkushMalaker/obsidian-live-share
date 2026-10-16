@@ -100,6 +100,32 @@ describe("FileOpsManager", () => {
       expect(fileManager.trashFile).toHaveBeenCalledWith(file);
     });
 
+    it("keeps completion and manifest updates pending when trash fails", async () => {
+      const file = createMockTFile("kept.md");
+      vault.files.set(file.path, file);
+      const afterApply = vi.fn();
+      fileManager.trashFile.mockRejectedValueOnce(new Error("permission denied"));
+      expect(await manager.applyRemoteOp({ type: "delete", path: file.path }, afterApply)).toBe(
+        false,
+      );
+      expect(afterApply).not.toHaveBeenCalled();
+      expect(vault.files.get(file.path)).toBe(file);
+    });
+
+    it("accepts a concurrent delete that completed before trash rejected", async () => {
+      const file = createMockTFile("gone.md");
+      vault.files.set(file.path, file);
+      const afterApply = vi.fn();
+      fileManager.trashFile.mockImplementationOnce(async () => {
+        vault.files.delete(file.path);
+        throw new Error("already deleted");
+      });
+      expect(await manager.applyRemoteOp({ type: "delete", path: file.path }, afterApply)).toBe(
+        true,
+      );
+      expect(afterApply).toHaveBeenCalledOnce();
+    });
+
     it("silently ignores delete of nonexistent file", async () => {
       await manager.applyRemoteOp({ type: "delete", path: "nope.md" });
       expect(fileManager.trashFile).not.toHaveBeenCalled();

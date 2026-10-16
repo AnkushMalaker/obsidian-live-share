@@ -220,8 +220,9 @@ export class FileOpsManager {
           if (file) {
             try {
               await this.fileManager.trashFile(file);
-            } catch {
-              // File may have already been deleted
+            } catch (deleteErr) {
+              // A concurrent delete is complete only if the item is now absent.
+              if (this.vault.getAbstractFileByPath(op.path)) throw deleteErr;
             }
           }
           this.pendingChunks.delete(op.path);
