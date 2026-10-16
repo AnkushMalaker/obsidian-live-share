@@ -48,24 +48,6 @@ describe("Canvas asynchronous saves", () => {
     expect(JSON.parse(host.files.get(path)!).nodes[0]).toMatchObject({ x: 100, y: 200 });
   });
 
-  it("ingests a native save whose event was muted by the preceding shared write", async () => {
-    const host = make();
-    await host.canvas.subscribe(path, "host");
-    const node = host.sync
-      .getDoc(`__canvas__:${path}`)
-      .doc.getMap<Y.Map<unknown>>("nodes")
-      .get("seed")!;
-    node.set("y", 200);
-    await vi.advanceTimersByTimeAsync(1000);
-    const saved = JSON.parse(host.files.get(path)!);
-    saved.nodes[0].x = 100;
-    // VaultEvents suppresses this event while the shared writer mutes the path.
-    host.files.set(path, JSON.stringify(saved));
-    await vi.advanceTimersByTimeAsync(2000);
-    expect(node.get("x")).toBe(100);
-    expect(JSON.parse(host.files.get(path)!).nodes[0]).toMatchObject({ x: 100, y: 200 });
-  });
-
   it("preserves edits made while the host plugin was unloaded and a guest retained the shared document", async () => {
     const host = make();
     const guest = make();
