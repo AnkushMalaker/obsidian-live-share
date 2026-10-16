@@ -6,6 +6,7 @@ import { DebugLogger } from "./debug-logger";
 import { CollabManager } from "./editor/collab";
 import { BackgroundSync } from "./files/background-sync";
 import { CanvasSync } from "./files/canvas-sync";
+import { CanvasWorkspace } from "./files/canvas-workspace";
 
 import { ExclusionManager } from "./files/exclusion";
 import { FileOpsManager } from "./files/file-ops";
@@ -668,7 +669,12 @@ export default class LiveSharePlugin extends Plugin {
     this.controlChannel.connect();
 
     this.explorerIndicators = new ExplorerIndicators();
-    this.canvasSync = new CanvasSync(this.app.vault, this.syncManager, this.fileOpsManager);
+    this.canvasSync = new CanvasSync(
+      this.app.vault,
+      this.syncManager,
+      this.fileOpsManager,
+      new CanvasWorkspace(this.app.workspace),
+    );
     // startAll runs after the manifest loads; its routing also covers new files,
     // renames, removal, and reconnects instead of taking this early empty snapshot.
     this.backgroundSync.setCanvasSync(this.canvasSync);

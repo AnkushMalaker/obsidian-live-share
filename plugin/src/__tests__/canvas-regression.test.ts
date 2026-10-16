@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { BackgroundSync } from "../files/background-sync";
 import { CanvasSync } from "../files/canvas-sync";
+import { CanvasWorkspace, type CanvasWritePreparation } from "../files/canvas-workspace";
 import { ManifestManager } from "../files/manifest";
 
 const path = "shared/board.canvas";
@@ -12,7 +13,10 @@ const seed = {
   metadata: { version: "1.0", frontmatter: { keep: true } },
 };
 
-function client(initial = new Map([[path, JSON.stringify(seed)]])) {
+function client(
+  initial = new Map([[path, JSON.stringify(seed)]]),
+  localViews?: CanvasWritePreparation,
+) {
   const files = new Map(initial);
   const docs = new Map<string, { doc: Y.Doc; text: Y.Text }>();
   const vault = {
@@ -43,7 +47,7 @@ function client(initial = new Map([[path, JSON.stringify(seed)]])) {
   const fileOps = { mutePathEvents: vi.fn(), unmutePathEvents: vi.fn() };
   const entries = new Map([...files].map(([name]) => [name, { hash: "initial", binary: false }]));
   const manifest = { getEntries: () => entries, updateFile: vi.fn(async () => {}) };
-  const canvas = new CanvasSync(vault as any, sync as any, fileOps as any);
+  const canvas = new CanvasSync(vault as any, sync as any, fileOps as any, localViews);
   const background = new BackgroundSync(
     vault as any,
     sync as any,
@@ -52,6 +56,37 @@ function client(initial = new Map([[path, JSON.stringify(seed)]])) {
     canvas,
   );
   return { files, docs, vault, sync, fileOps, entries, manifest, canvas, background };
+}
+
+function mountView(c: ReturnType<typeof client>, leaves: any[]) {
+  const view = {
+    file: { path },
+    dirty: false,
+    saving: false,
+    lastSavedData: c.files.get(path)!,
+    data: JSON.parse(c.files.get(path)!),
+    canvas: { nodes: new Map() },
+    getViewData() {
+      return JSON.stringify(this.data);
+    },
+    async save() {
+      this.dirty = false;
+      this.lastSavedData = this.getViewData();
+      c.files.set(path, this.lastSavedData);
+      // Obsidian emits this event while flushPendingChanges is awaiting save.
+      await c.canvas.handleLocalModify(path);
+    },
+  };
+  leaves.push({ view });
+  c.vault.adapter.write.mockImplementation(async (name, content) => {
+    c.files.set(name, content);
+    for (const leaf of leaves) {
+      leaf.view.data = JSON.parse(content);
+      leaf.view.lastSavedData = content;
+      leaf.view.dirty = false;
+    }
+  });
+  return view;
 }
 
 function link(a: ReturnType<typeof client>, b: ReturnType<typeof client>) {
@@ -154,6 +189,182 @@ describe("Canvas session regressions", () => {
     for (const c of [host, guest]) {
       expect(JSON.parse(c.files.get(path)!).nodes[0]).toMatchObject({ x: 400, height: 300 });
     }
+  });
+
+  it("keeps an unsaved card move when another card's remote move arrives first", async () => {
+    const board = { ...seed, nodes: [...seed.nodes, { ...seed.nodes[0], id: "second", x: 300 }] };
+    const host = make(new Map([[path, JSON.stringify(board)]]));
+    const leaves: any[] = [];
+    const guest = make(undefined, new CanvasWorkspace({ getLeavesOfType: () => leaves } as any));
+    await host.canvas.subscribe(path, "host");
+    link(host, guest);
+    await guest.canvas.subscribe(path, "guest");
+    const view = mountView(guest, leaves);
+    view.data.nodes[1].x = 500;
+    view.dirty = true; // Visible on screen, not on disk or Yjs yet.
+    host.files.set(
+      path,
+      JSON.stringify({ ...board, nodes: [{ ...board.nodes[0], x: 100 }, board.nodes[1]] }),
+    );
+    await host.canvas.handleLocalModify(path);
+    await vi.advanceTimersByTimeAsync(2200);
+    for (const c of [host, guest]) {
+      expect(JSON.parse(c.files.get(path)!).nodes.map((n: any) => n.x)).toEqual([100, 500]);
+    }
+    expect(view.data.nodes.map((n: any) => n.x)).toEqual([100, 500]);
+  });
+
+  it("uses each dirty view's baseline when flushing two views of the same canvas", async () => {
+    const leaves: any[] = [];
+    const host = make(undefined, new CanvasWorkspace({ getLeavesOfType: () => leaves } as any));
+    await host.canvas.subscribe(path, "host");
+    const first = mountView(host, leaves);
+    const second = mountView(host, leaves);
+    first.data.nodes[0].x = 100;
+    second.data.nodes[0].y = 200;
+    first.dirty = second.dirty = true;
+    host.sync
+      .getDoc(`__canvas__:${path}`)
+      .doc.getMap<Y.Map<unknown>>("nodes")
+      .get("seed")!
+      .set("width", 400);
+    await vi.advanceTimersByTimeAsync(2200);
+    expect(JSON.parse(host.files.get(path)!).nodes[0]).toMatchObject({
+      x: 100,
+      y: 200,
+      width: 400,
+    });
+  });
+
+  it("defers incoming writes while a Canvas save is already in flight", async () => {
+    const leaves: any[] = [];
+    const host = make(undefined, new CanvasWorkspace({ getLeavesOfType: () => leaves } as any));
+    await host.canvas.subscribe(path, "host");
+    const view = mountView(host, leaves);
+    view.data.nodes[0].x = 100;
+    view.dirty = view.saving = true;
+    host.sync
+      .getDoc(`__canvas__:${path}`)
+      .doc.getMap<Y.Map<unknown>>("nodes")
+      .get("seed")!
+      .set("y", 200);
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(host.vault.adapter.write).not.toHaveBeenCalled();
+    expect(view.data.nodes[0].x).toBe(100);
+    view.saving = false;
+    await vi.advanceTimersByTimeAsync(2200);
+    expect(JSON.parse(host.files.get(path)!).nodes[0]).toMatchObject({ x: 100, y: 200 });
+  });
+
+  it("rechecks dirty views after the asynchronous disk read", async () => {
+    const leaves: any[] = [];
+    const host = make(undefined, new CanvasWorkspace({ getLeavesOfType: () => leaves } as any));
+    await host.canvas.subscribe(path, "host");
+    const view = mountView(host, leaves);
+    host.sync
+      .getDoc(`__canvas__:${path}`)
+      .doc.getMap<Y.Map<unknown>>("nodes")
+      .get("seed")!
+      .set("y", 200);
+    host.vault.read.mockImplementationOnce(async () => {
+      view.data.nodes[0].x = 100;
+      view.dirty = true;
+      return host.files.get(path)!;
+    });
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(host.vault.adapter.write).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(2200);
+    expect(JSON.parse(host.files.get(path)!).nodes[0]).toMatchObject({ x: 100, y: 200 });
+  });
+
+  it("ingests a newer local disk save before its modify event has run", async () => {
+    const host = make();
+    await host.canvas.subscribe(path, "host");
+    host.sync
+      .getDoc(`__canvas__:${path}`)
+      .doc.getMap<Y.Map<unknown>>("nodes")
+      .get("seed")!
+      .set("y", 200);
+    host.files.set(path, JSON.stringify({ ...seed, nodes: [{ ...seed.nodes[0], x: 100 }] }));
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(JSON.parse(host.files.get(path)!).nodes[0]).toMatchObject({ x: 100, y: 200 });
+  });
+
+  it("serializes the latest remote state after asynchronous disk reads", async () => {
+    const host = make();
+    await host.canvas.subscribe(path, "host");
+    const shared = host.sync
+      .getDoc(`__canvas__:${path}`)
+      .doc.getMap<Y.Map<unknown>>("nodes")
+      .get("seed")!;
+    shared.set("y", 200);
+    host.vault.read.mockImplementationOnce(async () => {
+      shared.set("x", 100);
+      return host.files.get(path)!;
+    });
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(JSON.parse(host.files.get(path)!).nodes[0]).toMatchObject({ x: 100, y: 200 });
+  });
+
+  it("flushes a pending text-card editor before applying a remote position", async () => {
+    const leaves: any[] = [];
+    const host = make(undefined, new CanvasWorkspace({ getLeavesOfType: () => leaves } as any));
+    await host.canvas.subscribe(path, "host");
+    const view = mountView(host, leaves);
+    const child = {
+      dirty: true,
+      requestSave: {
+        run: vi.fn(() => {
+          child.dirty = false;
+          view.data.nodes[0].text = "Hi, my name is John.";
+          view.dirty = true;
+        }),
+      },
+    };
+    view.canvas.nodes.set("seed", { child });
+    host.sync
+      .getDoc(`__canvas__:${path}`)
+      .doc.getMap<Y.Map<unknown>>("nodes")
+      .get("seed")!
+      .set("x", 100);
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(child.requestSave.run).toHaveBeenCalledOnce();
+    expect(JSON.parse(host.files.get(path)!).nodes[0]).toMatchObject({
+      x: 100,
+      text: "Hi, my name is John.",
+    });
+  });
+
+  it("ignores a slow local read that finishes after a newer merged write", async () => {
+    const host = make();
+    await host.canvas.subscribe(path, "host");
+    const local = JSON.stringify({ ...seed, nodes: [{ ...seed.nodes[0], x: 100 }] });
+    host.files.set(path, local);
+    let finishRead!: (content: string) => void;
+    host.vault.read.mockImplementationOnce(
+      () =>
+        new Promise<string>((resolve) => {
+          finishRead = resolve;
+        }),
+    );
+    const pending = host.canvas.handleLocalModify(path);
+    host.sync
+      .getDoc(`__canvas__:${path}`)
+      .doc.getMap<Y.Map<unknown>>("nodes")
+      .get("seed")!
+      .set("y", 200);
+    await vi.advanceTimersByTimeAsync(1100);
+    finishRead(local);
+    await pending;
+    expect(
+      host.sync
+        .getDoc(`__canvas__:${path}`)
+        .doc.getMap<Y.Map<unknown>>("nodes")
+        .get("seed")!
+        .get("y"),
+    ).toBe(200);
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(JSON.parse(host.files.get(path)!).nodes[0]).toMatchObject({ x: 100, y: 200 });
   });
 
   it("does not echo a local save back over newer, unsaved text in an open card", async () => {

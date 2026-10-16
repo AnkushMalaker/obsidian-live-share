@@ -75,3 +75,37 @@ The suffix remained in the editor and the complete text reached both clients.
 This does not change plain card text from a whole-string Y.Map property into a
 character-level Y.Text. Simultaneous edits to the same card's text remain a
 separate collaboration limitation.
+
+## Pending movement overwritten by another card's move
+
+The earlier tests merged changes that had already reached disk. A Canvas view
+can hold a visible move for two seconds before saving it. The following live
+sequence reproduced a rollback on `4539d7c`:
+
+1. Start with two cards at x=0 and x=300, open on both Macs.
+2. Move the first card to x=100 on the host.
+3. About 2.1 seconds later, move the second card to x=500 on the guest.
+4. The host's update reaches the guest before its local save. The external disk
+   write restores the second card to x=300; both clients eventually agree on the
+   wrong position.
+
+`CanvasWorkspace` now flushes pending text-card buffers and board saves before
+an incoming write. It supplies each dirty view's own saved baseline, so their
+independent deltas merge into Yjs before disk/view refresh. Incoming writes defer
+while a save is in flight or a view becomes dirty during asynchronous work. A
+fresh disk read also captures saves whose vault event has not completed, and the
+outgoing graph is serialized after those reads. Superseded local reads cannot
+publish an older snapshot over a newer merged write.
+
+Eight additional regression tests cover unsaved moves, two dirty views of one
+board, an in-flight save, edits during a disk read, an unprocessed local save,
+remote updates during a disk read, pending text buffers, and a late stale read.
+Live movement checks on both Macs cover the exact failing timing in both
+directions, simultaneous moves to different cards, and repeated moves during an
+incoming update. Typing a delayed suffix while a different card moves remotely
+also passes in both directions, preserving both the text and the new position.
+
+The temporary diagnostic trace records test-card IDs, coordinates, save timing,
+and shared state. It does not record note contents. Live Share debug logging was
+disabled, so it did not provide a historical recording of the user's preceding
+actions. Temporary tracing is removed after reproduction.

@@ -10,6 +10,7 @@ import {
   toCanonicalPath,
   toLocalPath,
 } from "../utils";
+import type { CanvasWritePreparation } from "./canvas-workspace";
 import type { FileOpsManager } from "./file-ops";
 
 const CANVAS_DOC_PREFIX = "__canvas__:";
@@ -137,11 +138,14 @@ export class CanvasSync {
   private writeQueues = new Map<string, Promise<void>>();
   private recentDiskWrites = new Set<string>();
   private lastLocalData = new Map<string, CanvasData>();
+  private localReads = new Map<string, object>();
+  private flushingLocalViews = new Set<string>();
 
   constructor(
     private vault: Vault,
     private syncManager: SyncManager,
     private fileOpsManager: FileOpsManager,
+    private localViews?: CanvasWritePreparation,
   ) {}
 
   async subscribe(rawPath: string, role: "host" | "guest"): Promise<void> {
@@ -235,20 +239,37 @@ export class CanvasSync {
     this.observers.get(path)?.();
     this.observers.delete(path);
     this.lastLocalData.delete(path);
+    this.localReads.delete(path);
     this.syncManager.releaseDoc(`${CANVAS_DOC_PREFIX}${path}`);
   }
 
   async handleLocalModify(rawPath: string): Promise<void> {
     const path = toCanonicalPath(normalizePath(rawPath));
+    if (this.flushingLocalViews.has(path)) return;
     const subscription = this.subscriptions.get(path);
     if (!subscription) return;
     const handle = this.syncManager.getDoc(`${CANVAS_DOC_PREFIX}${path}`);
     const file = getFileByPath(this.vault, toLocalPath(path));
     if (!handle || !file) return;
+    const read = {};
+    this.localReads.set(path, read);
     const data = parseCanvas(await this.vault.read(file));
-    if (!data || this.subscriptions.get(path) !== subscription) return;
+    if (
+      !data ||
+      this.subscriptions.get(path) !== subscription ||
+      this.localReads.get(path) !== read
+    )
+      return;
     const previous = this.lastLocalData.get(path) ?? emptyCanvas();
     if (equal(data, previous)) return;
+    this.applyLocalData(path, data, previous);
+    this.scheduleDiskWrite(path, subscription);
+  }
+
+  private applyLocalData(path: string, data: CanvasData, previous: CanvasData): void {
+    if (equal(data, previous)) return;
+    const handle = this.syncManager.getDoc(`${CANVAS_DOC_PREFIX}${path}`);
+    if (!handle) return;
     // Apply the user's delta, not the entire saved snapshot. The view may still
     // be missing a remote card/position that arrived during the debounce window.
     handle.doc.transact(() => {
@@ -261,7 +282,7 @@ export class CanvasSync {
       if (this.roles.get(path) === "host" && !meta.get("seeded")) meta.set("seeded", true);
     }, this);
     this.lastLocalData.set(path, data);
-    this.scheduleDiskWrite(path, subscription);
+    this.localReads.delete(path);
   }
 
   isRecentDiskWrite(rawPath: string): boolean {
@@ -297,6 +318,41 @@ export class CanvasSync {
       const nodes = handle.doc.getMap<Y.Map<unknown>>("nodes");
       const edges = handle.doc.getMap<Y.Map<unknown>>("edges");
       if (!handle.doc.getMap("meta").get("seeded") && nodes.size === 0 && edges.size === 0) return;
+      const diskPath = toLocalPath(path);
+      // Any outstanding local read predates the fresh save/read below.
+      this.localReads.delete(path);
+      if (this.localViews) {
+        let ready: boolean;
+        this.flushingLocalViews.add(path);
+        try {
+          ready = await this.localViews.flushPendingChanges(diskPath, (content, baseline) => {
+            if (this.subscriptions.get(path) !== subscription) return;
+            const next = parseCanvas(content);
+            const previous = parseCanvas(baseline);
+            if (next && previous) this.applyLocalData(path, next, previous);
+          });
+        } finally {
+          this.flushingLocalViews.delete(path);
+        }
+        if (this.subscriptions.get(path) !== subscription) return;
+        if (!ready) {
+          this.scheduleDiskWrite(path, subscription);
+          return;
+        }
+      }
+      const parentDir = diskPath.substring(0, diskPath.lastIndexOf("/"));
+      if (parentDir) await ensureFolder(this.vault, parentDir);
+      const file = getFileByPath(this.vault, diskPath);
+      const existing = file ? parseCanvas(await this.vault.read(file)) : null;
+      if (this.subscriptions.get(path) !== subscription) return;
+      // Also ingest a save whose vault event is still being processed. Build
+      // the outgoing snapshot only after these asynchronous reads/flushes.
+      const previous = this.lastLocalData.get(path);
+      if (existing && previous) this.applyLocalData(path, existing, previous);
+      if (this.localViews?.hasPendingChanges(diskPath)) {
+        this.scheduleDiskWrite(path, subscription);
+        return;
+      }
       const content = JSON.stringify(
         {
           ...handle.doc.getMap("properties").toJSON(),
@@ -306,26 +362,26 @@ export class CanvasSync {
         null,
         "\t",
       );
-      const diskPath = toLocalPath(path);
       const data = parseCanvas(content);
       if (!data) return;
-      const file = getFileByPath(this.vault, diskPath);
       // Obsidian serializes Canvas differently from our shared document. An
       // equivalent rewrite still reloads an open card and can discard text
       // typed since its last save. Only write actual graph changes.
-      if (file && equal(parseCanvas(await this.vault.read(file)), data)) {
+      if (equal(existing, data)) {
         this.lastLocalData.set(path, data);
+        this.localReads.delete(path);
         return;
       }
       if (this.subscriptions.get(path) !== subscription) return;
       this.recentDiskWrites.add(path);
       this.fileOpsManager.mutePathEvents(diskPath);
       try {
-        const parentDir = diskPath.substring(0, diskPath.lastIndexOf("/"));
-        if (parentDir) await ensureFolder(this.vault, parentDir);
         if (this.subscriptions.get(path) !== subscription) return;
         await this.vault.adapter.write(diskPath, content);
-        if (this.subscriptions.get(path) === subscription) this.lastLocalData.set(path, data);
+        if (this.subscriptions.get(path) === subscription) {
+          this.lastLocalData.set(path, data);
+          this.localReads.delete(path);
+        }
       } finally {
         setTimeout(() => {
           this.recentDiskWrites.delete(path);
